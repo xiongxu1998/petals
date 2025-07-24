@@ -172,7 +172,7 @@ async def iterate_rpc_inference(
             # TODO: kwargs currently is unused, it can be used later for peft-like adaptation
             flat_tensors, kwargs = unpack_args_kwargs(flat_tensors, args_structure)
 
-        hidden_states, prompts, hypo_ids, *_ = flat_tensors
+        hidden_states, prompts, hypo_ids, tree_mask, kv_cache_position_ids, *_ = flat_tensors
         batch_size, length_increment, _ = hidden_states.shape
 
         # Cast inputs to backend dtype
@@ -212,7 +212,7 @@ async def iterate_rpc_inference(
             assert hidden_states.ndim == 3, f"hidden states must be a single 3d tensor"
             if can_merge_pools:
                 inference_infos = tuple(
-                    InferenceMetadata(uid, prefix_length, tuple(handles), active_adapter)
+                    InferenceMetadata(uid, prefix_length, tuple(handles), active_adapter, tree_attention_mask=tree_mask, kv_cache_position_ids=kv_cache_position_ids)
                     for uid, handles in zip(requested_uids, cache_handles)
                 )
                 (hidden_states,) = await requested_backends[0].inference_pool.submit_task(
@@ -220,7 +220,7 @@ async def iterate_rpc_inference(
                 )
             else:
                 for backend, uid, handles, prompt in zip(requested_backends, requested_uids, cache_handles, prompts):
-                    inference_infos = (InferenceMetadata(uid, prefix_length, tuple(handles), active_adapter),)
+                    inference_infos = (InferenceMetadata(uid, prefix_length, tuple(handles), active_adapter, tree_attention_mask=tree_mask, kv_cache_position_ids=kv_cache_position_ids),)
                     (hidden_states,) = await backend.inference_pool.submit_task(
                         hidden_states, hypo_ids, inference_infos, prompt, priority=priority
                     )

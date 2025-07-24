@@ -99,6 +99,8 @@ class _ServerInferenceSession:
         inputs: torch.Tensor,
         prompts: torch.Tensor,
         hypo_ids: torch.LongTensor,
+        tree_attention_mask: Optional[torch.Tensor] = None,
+        kv_cache_position_ids: Optional[torch.Tensor] = None,
         *,
         step_id: str,
     ) -> torch.Tensor:
@@ -126,7 +128,7 @@ class _ServerInferenceSession:
             inputs = inputs[:, -n_input_tokens:]  # No need to pass prefix further
 
         # serialize inputs and put them into the queue
-        input_tensors, args_structure = pack_args_kwargs(inputs, prompts, hypo_ids)
+        input_tensors, args_structure = pack_args_kwargs(inputs, prompts, hypo_ids, tree_attention_mask, kv_cache_position_ids)
 
         request_metadata = dict(session_id=self.session_id, step_id=step_id)
         if not self.stepped:
@@ -286,6 +288,8 @@ class InferenceSession:
         inputs: torch.Tensor,
         prompts: Optional[torch.Tensor] = None,
         hypo_ids: Optional[torch.Tensor] = None,
+        tree_attention_mask: Optional[torch.Tensor] = None,
+        kv_cache_position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert not self._closed
         if torch.is_grad_enabled():
@@ -311,6 +315,8 @@ class InferenceSession:
         inputs = inputs.cpu()
         prompts = prompts.cpu()
         hypo_ids = hypo_ids.cpu()
+        tree_attention_mask = tree_attention_mask.cpu()
+        kv_cache_position_ids = kv_cache_position_ids.cpu() if kv_cache_position_ids is not None else None
         step_id = str(uuid.uuid4())
 
         n_input_tokens = inputs.shape[1]
@@ -335,6 +341,8 @@ class InferenceSession:
                         inputs,
                         prompts[server_session.span.start : server_session.span.end],
                         hypo_ids,
+                        tree_attention_mask,
+                        kv_cache_position_ids,
                         step_id=step_id,
                     )
 

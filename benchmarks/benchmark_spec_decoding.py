@@ -9,8 +9,10 @@ import torch
 from hivemind.utils.logging import get_logger
 from transformers import AutoTokenizer
 
-from petals import AutoDistributedModelForCausalLM
+from petals import AutoDistributedModelForCausalLM, AutoDistributedSpeculativeModel
 from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
+
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 logger = get_logger()
 
@@ -45,28 +47,34 @@ def main():
 def benchmark_inference(process_idx, args, result_pipe):
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
     # Using use_fast=False since LlamaTokenizerFast takes a long time to start, and we decode 1 token at a time anyway
+    
+    ssm = AutoModelForCausalLM.from_pretrained("JackFram/llama-68m")
 
-    model = AutoDistributedModelForCausalLM.from_pretrained(
+    model = AutoDistributedSpeculativeModel.from_pretrained(
         args.model, initial_peers=args.initial_peers, torch_dtype=DTYPE_MAP[args.torch_dtype]
     )
     logger.info(f"Created model: {process_idx=} {model.device=}")
 
     result = ""
     step_times = []
-    with model.transformer.h.inference_session(max_length=args.seq_len) as sess:
-        for step in range(args.seq_len):
-            start_time = perf_counter()
+    # with model.transformer.h.inference_session(max_length=args.seq_len) as sess:
+    #     for step in range(args.seq_len):
+    #         start_time = perf_counter()
 
-            outputs = model.generate(max_new_tokens=1, session=sess)
-            result += tokenizer.decode(outputs[0])
+    #         outputs = model.generate(max_new_tokens=1, session=sess)
+    #         result += tokenizer.decode(outputs[0])
 
-            logger.info(f"benchmark_inference, result: {result}")
-            if step >= args.warmup_steps:
-                step_times.append(perf_counter() - start_time)
-                speed = 1 / np.mean(step_times)
-                logger.info(f"{process_idx=} {step=} {speed=:.2f}")
-
-    result_pipe.send(speed)
+    #         logger.info(f"benchmark_inference, result: {result}")
+    #         if step >= args.warmup_steps:
+    #             step_times.append(perf_counter() - start_time)
+    #             speed = 1 / np.mean(step_times)
+    #             logger.info(f"{process_idx=} {step=} {speed=:.2f}")
+    
+    test_prompt = "Hello world from Xu, I am a master student from"
+    input_ids = tokenizer.encode(test_prompt, return_tensors="pt", add_special_tokens=False)
+    result = model.generate(input_ids=input_ids, ssm=ssm)
+    logger.info(f"benchmark_inference, result: {result}")
+    result_pipe.send(5)
 
 
 if __name__ == "__main__":

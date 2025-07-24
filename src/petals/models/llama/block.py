@@ -20,8 +20,11 @@ from transformers.models.llama.modeling_llama import (
     rotate_half,
 )
 
+from hivemind.utils import get_logger
+
 from petals.utils.cuda_graphs import make_inference_graphed_callable
 
+logger = get_logger(__name__)
 
 def apply_rotary_pos_emb(q, k, cos, sin):
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -108,6 +111,7 @@ class OptimizedLlamaAttention(LlamaAttention):
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:
+            logger.info(f"OptimizedLlamaAttention, attention_mask: {attention_mask.shape}, attn_weights: {attn_weights.shape}")
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
@@ -251,12 +255,30 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
             attention_mask = torch.ones(
                 (batch_size, seq_length_with_past), dtype=torch.bool, device=hidden_states.device
             )
-        attention_mask = _prepare_4d_causal_attention_mask(
-            attention_mask=attention_mask,
-            input_shape=(batch_size, seq_length),
-            inputs_embeds=hidden_states,
-            past_key_values_length=past_key_values_length,
-        )
+        if attention_mask.dim() == 3:
+            attention_mask = attention_mask.unsqueeze(1)  # (B, 1, T, S)
+        elif attention_mask.dim() == 4:
+            pass  # 已经是合法 4D mask
+        else:
+            attention_mask = _prepare_4d_causal_attention_mask(
+                attention_mask=attention_mask,
+                input_shape=(batch_size, seq_length),
+                inputs_embeds=hidden_states,
+                past_key_values_length=past_key_values_length,
+            )
+        logger.info(f"WrappedLlamaBlock forward, attention_mask: {attention_mask}, seq_length_with_past: {seq_length_with_past}, seq_length: {seq_length}, past_key_values_length: {past_key_values_length}")
+        
+        # test_attention_mask = torch.ones(
+        #         (batch_size, seq_length_with_past), dtype=torch.bool, device=hidden_states.device
+        #     )
+        # test_attention_mask = _prepare_4d_causal_attention_mask(
+        #         attention_mask=test_attention_mask,
+        #         input_shape=(batch_size, seq_length),
+        #         inputs_embeds=hidden_states,
+        #         past_key_values_length=past_key_values_length,
+        #     )
+        
+        # logger.info(f"WrappedLlamaBlock forward, test_attention_mask: {test_attention_mask}")
 
         outputs = super().forward(
             hidden_states,
