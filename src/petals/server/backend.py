@@ -170,7 +170,7 @@ class TransformerBackend(ModuleBackend):
                     output_hidden_states = output_hidden_states_chunk  # saves one memcopy
                 layer_past = new_kvs
 
-            self._update_cache_inplace(cache_tensors, new_kvs, inference_info.prefix_length)
+            self._update_cache_inplace(cache_tensors, new_kvs, past_key_values_length)
             return (output_hidden_states,)
 
     def _estimate_max_chunk_length(self, hidden_states: torch.Tensor, inference_info: InferenceMetadata) -> int:
@@ -339,6 +339,7 @@ class TransformerBackend(ModuleBackend):
                     
                     # 合并前文位置和树位置
                     complete_positions = torch.cat([prefix_positions, batch_positions])
+                    logger.info(f"_select_layer_past, complete_positions: {complete_positions}")
                     all_positions_list.append(complete_positions)
                 
                 # 找到最大长度，用于填充
@@ -371,8 +372,10 @@ class TransformerBackend(ModuleBackend):
                 if expanded_mask.any():
                     mask_key = expanded_mask.unsqueeze(1).expand(-1, k.shape[1], -1)
                     mask_value = expanded_mask.unsqueeze(2).expand(-1, -1, v.shape[2])
-                    selected_key = selected_key * mask_key.float()
-                    selected_value = selected_value * mask_value.float()
+                    
+                    # 使用原始tensor的数据类型，而不是强制转换为float
+                    selected_key = selected_key * mask_key.to(selected_key.dtype)
+                    selected_value = selected_value * mask_value.to(selected_value.dtype)
                 
                 key_cache[i] = selected_key
                 value_cache[i] = selected_value

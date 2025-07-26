@@ -88,6 +88,7 @@ class DistributedLlamaModel(FromPretrainedMixin, PTuneMixin, LlamaModel):
         hidden_states = inputs_embeds
         output_shape = input_shape + (hidden_states.size(-1),)
 
+        logger.info(f"DistributedLlamaModel, past_key_values: {past_key_values.kv_cache_position_ids if past_key_values is not None else None,}")
         hidden_states = self.layers(
             hidden_states,
             prompts=intermediate_prompts,

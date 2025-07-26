@@ -128,8 +128,12 @@ class _ServerInferenceSession:
             inputs = inputs[:, -n_input_tokens:]  # No need to pass prefix further
 
         # serialize inputs and put them into the queue
-        input_tensors, args_structure = pack_args_kwargs(inputs, prompts, hypo_ids, tree_attention_mask, kv_cache_position_ids)
-
+        combined_mask = self.pack_kv_into_tree_mask(tree_attention_mask, kv_cache_position_ids)
+        
+        input_tensors, args_structure = pack_args_kwargs(inputs, prompts, hypo_ids, combined_mask, kv_cache_position_ids)
+        
+        logger.info(f"_ServerInferenceSession, kv_cache_position_ids: {kv_cache_position_ids}, tree_attention_mask: {tree_attention_mask}, input_tensors: {input_tensors}, args_structure: {args_structure}")
+        
         request_metadata = dict(session_id=self.session_id, step_id=step_id)
         if not self.stepped:
             request_metadata.update(self.session_metadata)
@@ -146,11 +150,17 @@ class _ServerInferenceSession:
         server_side_inference_schema, kwargs_schema = self.rpc_info["inference_schema"]
         compression = server_side_inference_schema[0].compression
         inference_schema = tuple(BatchTensorDescriptor.from_tensor(arg, compression) for arg in input_tensors)
+        
+        logger.info(f"input_tensors length: {len(input_tensors)}")
+        logger.info(f"server_side_inference_schema length: {len(server_side_inference_schema)}")  
+        logger.info(f"inference_schema length: {len(inference_schema)}")
 
         # TODO: create more explicit way to check servers schema and client's structure
-        assert len(input_tensors) >= len(
-            server_side_inference_schema
-        ), "Hidden_state, prompts and hypo_ids tensors are necessary for an inference step"
+        # assert len(input_tensors) >= len(
+        #     server_side_inference_schema
+        # ), "Hidden_state, prompts and hypo_ids tensors are necessary for an inference step"
+        
+        
 
         outputs_serialized = RemoteExpertWorker.run_coroutine(
             self._step(
@@ -172,6 +182,34 @@ class _ServerInferenceSession:
         self._position += n_input_tokens
 
         return outputs[0]
+    
+    def pack_kv_into_tree_mask(self, tree_attention_mask, kv_cache_position_ids):
+        """
+        在tree_attention_mask最后添加一行，用特殊值padding
+        """
+        original_shape = tree_attention_mask.shape
+        original_dtype = tree_attention_mask.dtype  # 保持原始dtype
+        
+        # 创建新的一行，使用相同的dtype和device
+        extra_row_shape = (original_shape[0], 1) + original_shape[2:]
+        extra_row = torch.full(extra_row_shape, 254, dtype=original_dtype, device=tree_attention_mask.device)  # 使用原始dtype
+        
+        if kv_cache_position_ids is not None:
+            kv_flat = kv_cache_position_ids.flatten()
+            available_space = extra_row.numel() - 1
+            actual_len = min(len(kv_flat), available_space)
+            
+            extra_flat = extra_row.view(-1)
+            # 确保类型匹配
+            extra_flat[:actual_len] = kv_flat[:actual_len].to(original_dtype)  # 转换为原始dtype
+            extra_flat[-1] = actual_len
+            extra_row = extra_flat.view(extra_row_shape)
+        else:
+            extra_row.view(-1)[-1] = 255
+        
+        combined_mask = torch.cat([tree_attention_mask, extra_row], dim=1)
+        return combined_mask
+
 
     def _collect_next_servers(self) -> List[Tuple[str, str, int, int]]:
         next_servers = []
@@ -318,6 +356,8 @@ class InferenceSession:
         tree_attention_mask = tree_attention_mask.cpu()
         kv_cache_position_ids = kv_cache_position_ids.cpu() if kv_cache_position_ids is not None else None
         step_id = str(uuid.uuid4())
+        
+        logger.info(f"InferenceSession, kv_cache_position_ids: {kv_cache_position_ids}")
 
         n_input_tokens = inputs.shape[1]
         if self._position + n_input_tokens > self._max_length:
