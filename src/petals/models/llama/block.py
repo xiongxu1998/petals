@@ -266,7 +266,7 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
                 inputs_embeds=hidden_states,
                 past_key_values_length=past_key_values_length,
             )
-        logger.info(f"WrappedLlamaBlock forward, attention_mask: {attention_mask}, seq_length_with_past: {seq_length_with_past}, seq_length: {seq_length}, past_key_values_length: {past_key_values_length}")
+        # logger.info(f"WrappedLlamaBlock forward, attention_mask: {attention_mask}, seq_length_with_past: {seq_length_with_past}, seq_length: {seq_length}, past_key_values_length: {past_key_values_length}")
         
         # test_attention_mask = torch.ones(
         #         (batch_size, seq_length_with_past), dtype=torch.bool, device=hidden_states.device

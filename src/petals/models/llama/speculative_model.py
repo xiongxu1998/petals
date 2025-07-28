@@ -163,6 +163,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
             unfinished_sequences = unfinished_sequences & ~stopping_criteria(current_input_ids, None)
             finished = unfinished_sequences.max() == 0
             step_idx += 1
+            logger.info(f"finished: {finished}, current_input_ids.shape[1]: {current_input_ids.shape[1]}, input_ids.shape[1]: {input_ids.shape[1]}, max_new_tokens: {max_new_tokens}")
 
         if streamer is not None:
             streamer.end()

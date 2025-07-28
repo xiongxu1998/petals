@@ -57,6 +57,7 @@ def benchmark_inference(process_idx, args, result_pipe):
 
     result = ""
     step_times = []
+    start_time = perf_counter()
     # with model.transformer.h.inference_session(max_length=args.seq_len) as sess:
     #     for step in range(args.seq_len):
     #         start_time = perf_counter()
@@ -73,8 +74,11 @@ def benchmark_inference(process_idx, args, result_pipe):
     test_prompt = "Hello world from Xu, I am a master student from"
     input_ids = tokenizer.encode(test_prompt, return_tensors="pt", add_special_tokens=False)
     result = model.generate(input_ids=input_ids, ssm=ssm)
-    logger.info(f"benchmark_inference, result: {result}")
-    result_pipe.send(5)
+    time = perf_counter() - start_time
+    generated_tokens_num = result.shape[1] - input_ids.shape[1]
+    speed = generated_tokens_num / time
+    logger.info(f"benchmark_inference, result: {result}, generated_tokens_num: {generated_tokens_num}, time: {time} speed: {speed}")
+    result_pipe.send(speed)
 
 
 if __name__ == "__main__":

@@ -132,7 +132,7 @@ class _ServerInferenceSession:
         
         input_tensors, args_structure = pack_args_kwargs(inputs, prompts, hypo_ids, combined_mask, kv_cache_position_ids)
         
-        logger.info(f"_ServerInferenceSession, kv_cache_position_ids: {kv_cache_position_ids}, tree_attention_mask: {tree_attention_mask}, input_tensors: {input_tensors}, args_structure: {args_structure}")
+        # logger.info(f"_ServerInferenceSession, kv_cache_position_ids: {kv_cache_position_ids}, tree_attention_mask: {tree_attention_mask}, input_tensors: {input_tensors}, args_structure: {args_structure}")
         
         request_metadata = dict(session_id=self.session_id, step_id=step_id)
         if not self.stepped:
@@ -151,9 +151,9 @@ class _ServerInferenceSession:
         compression = server_side_inference_schema[0].compression
         inference_schema = tuple(BatchTensorDescriptor.from_tensor(arg, compression) for arg in input_tensors)
         
-        logger.info(f"input_tensors length: {len(input_tensors)}")
-        logger.info(f"server_side_inference_schema length: {len(server_side_inference_schema)}")  
-        logger.info(f"inference_schema length: {len(inference_schema)}")
+        # logger.info(f"input_tensors length: {len(input_tensors)}")
+        # logger.info(f"server_side_inference_schema length: {len(server_side_inference_schema)}")  
+        # logger.info(f"inference_schema length: {len(inference_schema)}")
 
         # TODO: create more explicit way to check servers schema and client's structure
         # assert len(input_tensors) >= len(

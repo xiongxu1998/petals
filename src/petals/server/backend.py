@@ -123,54 +123,63 @@ class TransformerBackend(ModuleBackend):
         ) as cache_tensors, self._peft_module.using_adapter(inference_info.active_adapter):
             self._reorder_cache_inplace(cache_tensors, hypo_ids)
 
-            # We chunk the inputs so that peak memory for long sequences fits into `autograd_memory`
-            # reserved in `Server._choose_num_blocks()`. This saves us from OOMs if `max_chunk_size_bytes`
-            # is at least 4-6x less than `autograd_memory`.
+            # 估算最大块长度
             max_chunk_length = self._estimate_max_chunk_length(hidden_states, inference_info)
             output_hidden_states = torch.empty_like(hidden_states) if seq_len > max_chunk_length else None
             
-            # kv_cache_position_ids = inference_info.kv_cache_position_ids
-            # root_position = inference_info.prefix_len
-            # if kv_cache_position_ids is None:
-            #     root_position = inference_info.prefix_len
-            # elif len(kv_cache_position_ids) == 1:
-            #     root_position = kv_cache_position_ids[0]
-            #     kv_cache_position_ids = None
-            # else:
-            #     root_position = kv_cache_position_ids[0]
-            #     kv_cache_position_ids = kv_cache_position_ids[1: ]
-            
             logger.info(f"inference_step, prefix_len: {inference_info.prefix_length}, kv_cache_position_ids: {inference_info.kv_cache_position_ids}")
-            layer_past = self._select_layer_past(cache_tensors, inference_info.prefix_length, inference_info.kv_cache_position_ids)
+            
+            # 1. 选择需要的 cache（返回两个值）
+            layer_past, new_position_mapping = self._select_layer_past(
+                cache_tensors, 
+                inference_info.prefix_length, 
+                inference_info.kv_cache_position_ids
+            )
+            
+            # 2. 获取 past_key_values 的长度
             past_key_values_length = 0
-            if layer_past is not None:
+            if layer_past is not None and len(layer_past) > 0:
                 past_key_values_length = layer_past[0].shape[2]
+            
+            # 3. 如果使用了 kv_cache_position_ids，需要更新 cache_tensors
+            # 使选中的 cache 在原始位置上变成连续存储
+            if inference_info.kv_cache_position_ids is not None and not is_dummy(inference_info.kv_cache_position_ids):
+                # 这里需要将 layer_past 的内容写回 cache_tensors 的前面部分
+                # 使其在物理上连续存储
+                self._compact_cache_inplace(cache_tensors, layer_past, past_key_values_length)
+            
+            # 4. 创建 attention mask
             full_mask = self._create_attention_mask(
                 tree_attention_mask=inference_info.tree_attention_mask,
                 src_len=seq_len + past_key_values_length,
                 past_key_values_length=past_key_values_length,
                 device=hidden_states.device,
             )
-            attention_mask = self.convert_mask_to_scores(full_mask)
-            # logger.info(f"inference_step, full_mask: {attention_mask}")
+            attention_mask = self.convert_mask_to_scores(full_mask) if full_mask is not None else None
+            
             logger.info(f"inference_step, layer_past: {layer_past}")
+            
+            # 5. 分块处理
             for offset in range(0, seq_len, max_chunk_length):
                 hidden_states_chunk = hidden_states[:, offset : offset + max_chunk_length, :]
                 
-                # if full_mask is not None:
-                #     attention_mask = full_mask[:, :inference_info.prefix_length + offset + chunk_len]
-                # else:
-                #     attention_mask = None
                 output_hidden_states_chunk, new_kvs = self.module.forward(
-                    hidden_states_chunk, layer_past=layer_past, attention_mask=attention_mask, use_cache=True
+                    hidden_states_chunk, 
+                    layer_past=layer_past, 
+                    attention_mask=attention_mask, 
+                    use_cache=True
                 )
+                
                 if seq_len > max_chunk_length:
                     output_hidden_states[:, offset : offset + max_chunk_length] = output_hidden_states_chunk
                 else:
-                    output_hidden_states = output_hidden_states_chunk  # saves one memcopy
+                    output_hidden_states = output_hidden_states_chunk
+                
                 layer_past = new_kvs
 
+            # 6. 最后更新 cache（将新生成的 KV 写入）
             self._update_cache_inplace(cache_tensors, new_kvs, past_key_values_length)
+            
             return (output_hidden_states,)
 
     def _estimate_max_chunk_length(self, hidden_states: torch.Tensor, inference_info: InferenceMetadata) -> int:
@@ -298,10 +307,41 @@ class TransformerBackend(ModuleBackend):
             bits = bits.movedim(-2, dim)
 
         return bits
+    
+    def _compact_cache_inplace(
+        self, 
+        cache_tensors: Sequence[torch.Tensor], 
+        selected_cache: Sequence[torch.Tensor], 
+        selected_length: int
+    ):
+        """
+        将选中的 cache 内容写回原始 cache_tensors 的前面部分，
+        使其在物理上连续存储
+        """
+        for i, (cache_tensor, selected) in enumerate(zip(cache_tensors, selected_cache)):
+            if i % 2 == 0:  # Key cache
+                # selected shape: [batch * num_heads, head_dim, selected_length]
+                # cache_tensor shape: [batch, num_heads, head_dim, max_length]
+                batch_size = cache_tensor.shape[0]
+                num_heads = cache_tensor.shape[1]
+                head_dim = cache_tensor.shape[2]
+                
+                selected_reshaped = selected.view(batch_size, num_heads, head_dim, selected_length)
+                cache_tensor[:, :, :, :selected_length] = selected_reshaped
+            else:  # Value cache
+                # selected shape: [batch * num_heads, selected_length, head_dim]
+                # cache_tensor shape: [batch, num_heads, max_length, head_dim]
+                batch_size = cache_tensor.shape[0]
+                num_heads = cache_tensor.shape[1]
+                head_dim = cache_tensor.shape[3]
+                
+                selected_reshaped = selected.view(batch_size, num_heads, selected_length, head_dim)
+                cache_tensor[:, :, :selected_length, :] = selected_reshaped
 
-    def _select_layer_past(self, cache_tensors: Sequence[torch.Tensor], prefix_length: int, kv_cache_position_ids: Optional[torch.Tensor] = None) -> Sequence[torch.Tensor]:
+    def _select_layer_past(self, cache_tensors: Sequence[torch.Tensor], prefix_length: int, kv_cache_position_ids: Optional[torch.Tensor] = None) -> Tuple[Sequence[torch.Tensor], Optional[torch.Tensor]]:
         """Extract first {prefix_length} tokens and optionally specific positions based on kv_cache_position_ids"""
         key_cache, value_cache = list(cache_tensors[0::2]), list(cache_tensors[1::2])
+        new_position_mapping = None  # 用于记录新的位置映射
         
         for i in range(len(key_cache)):
             # 首先获取原始的 key 和 value cache
@@ -328,6 +368,8 @@ class TransformerBackend(ModuleBackend):
                 
                 # 构建完整的位置列表：前文 + 树节点
                 all_positions_list = []
+                continuous_positions_list = []  # 新的连续位置列表
+                
                 for batch_idx in range(batch_size):
                     batch_positions = position_ids[batch_idx]  # [num_tree_positions]
                     
@@ -340,7 +382,12 @@ class TransformerBackend(ModuleBackend):
                     # 合并前文位置和树位置
                     complete_positions = torch.cat([prefix_positions, batch_positions])
                     logger.info(f"_select_layer_past, complete_positions: {complete_positions}")
+                    
+                    # 创建连续的新位置映射
+                    continuous_positions = torch.arange(len(complete_positions), device=position_ids.device)
+                    
                     all_positions_list.append(complete_positions)
+                    continuous_positions_list.append(continuous_positions)
                 
                 # 找到最大长度，用于填充
                 max_length = max(len(pos) for pos in all_positions_list)
@@ -368,23 +415,31 @@ class TransformerBackend(ModuleBackend):
                 # value cache: 在第1维(seq_len维)上选择  
                 selected_value = torch.gather(v, 1, expanded_positions.unsqueeze(2).expand(-1, -1, v.shape[2]))
                 
-                # 应用mask，将无效位置设为0（虽然通常不会被使用）
+                # 应用mask，将无效位置设为0
                 if expanded_mask.any():
                     mask_key = expanded_mask.unsqueeze(1).expand(-1, k.shape[1], -1)
                     mask_value = expanded_mask.unsqueeze(2).expand(-1, -1, v.shape[2])
-                    
-                    # 使用原始tensor的数据类型，而不是强制转换为float
                     selected_key = selected_key * mask_key.to(selected_key.dtype)
                     selected_value = selected_value * mask_value.to(selected_value.dtype)
                 
+                # 只保留有效的部分（去除padding）
+                valid_length = max(len(pos) for pos in all_positions_list)
+                selected_key = selected_key[:, :, :valid_length]
+                selected_value = selected_value[:, :valid_length, :]
+                
                 key_cache[i] = selected_key
                 value_cache[i] = selected_value
+                
+                # 记录新的位置映射（用于下次推理）
+                if i == 0:  # 只需要记录一次
+                    new_position_mapping = torch.arange(valid_length, device=position_ids.device)
                 
                 logger.info(
                     f"[KV] L{i:02d} selected key shape {tuple(selected_key.shape)} "
                     f"value shape {tuple(selected_value.shape)} "
                     f"root_positions: {[pos[0].item() for pos in all_positions_list]} "
-                    f"total_positions: {[len(pos) for pos in all_positions_list]}"
+                    f"total_positions: {[len(pos) for pos in all_positions_list]} "
+                    f"compacted to continuous length: {valid_length}"
                 )
             else:
                 # 原有逻辑：只选择前 prefix_length 个 tokens
@@ -410,7 +465,9 @@ class TransformerBackend(ModuleBackend):
         layer_past = tuple(chain(*zip(key_cache, value_cache)))
         logger.info(f"cache_tensors size: {len(cache_tensors)}, selected layer_past size: {len(layer_past)}")
         
-        return PerDeviceTensors(*layer_past) if len(self.module.module_shards) > 1 else layer_past
+        # 返回 cache 和新的长度信息
+        result = PerDeviceTensors(*layer_past) if len(self.module.module_shards) > 1 else layer_past
+        return result, new_position_mapping
 
     def _update_cache_inplace(
         self, cache_tensors: Sequence[torch.Tensor], new_kvs: Sequence[torch.Tensor], prefix_length: int
