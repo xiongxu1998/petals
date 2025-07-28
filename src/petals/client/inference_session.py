@@ -357,7 +357,7 @@ class InferenceSession:
         kv_cache_position_ids = kv_cache_position_ids.cpu() if kv_cache_position_ids is not None else None
         step_id = str(uuid.uuid4())
         
-        logger.info(f"InferenceSession, kv_cache_position_ids: {kv_cache_position_ids}")
+        # logger.info(f"InferenceSession, kv_cache_position_ids: {kv_cache_position_ids}")
 
         n_input_tokens = inputs.shape[1]
         if self._position + n_input_tokens > self._max_length:
