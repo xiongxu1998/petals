@@ -57,7 +57,6 @@ def benchmark_inference(process_idx, args, result_pipe):
 
     result = ""
     step_times = []
-    start_time = perf_counter()
     # with model.transformer.h.inference_session(max_length=args.seq_len) as sess:
     #     for step in range(args.seq_len):
     #         start_time = perf_counter()
@@ -73,6 +72,10 @@ def benchmark_inference(process_idx, args, result_pipe):
     
     test_prompt = "Hello world from Xu, I am a master student from"
     input_ids = tokenizer.encode(test_prompt, return_tensors="pt", add_special_tokens=False)
+    with torch.no_grad():
+        dummy_input = torch.ones(1, 8, dtype=torch.long, device=input_ids.device)
+        ssm(dummy_input, attention_mask=torch.ones_like(dummy_input))
+    start_time = perf_counter()
     result = model.generate(input_ids=input_ids, ssm=ssm)
     time = perf_counter() - start_time
     generated_tokens_num = result.shape[1] - input_ids.shape[1]

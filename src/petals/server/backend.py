@@ -198,16 +198,16 @@ class TransformerBackend(ModuleBackend):
             t7 = time.time()
             
             # 打印时间统计
-            # logger.info(
-            #     f"[Timing] inference_step total: {t7-t0:.4f}s | "
-            #     f"reorder_cache: {t1-t0:.4f}s | "
-            #     f"estimate_chunk: {t2-t1:.4f}s | "
-            #     f"select_layer_past: {t3-t2:.4f}s | "
-            #     f"compact_cache: {t4-t3:.4f}s | "
-            #     f"create_mask: {t5-t4:.4f}s | "
-            #     f"forward: {forward_time:.4f}s | "
-            #     f"update_cache: {t7-t6:.4f}s"
-            # )
+            logger.info(
+                f"[Timing] inference_step total: {t7-t0:.4f}s | "
+                f"reorder_cache: {t1-t0:.4f}s | "
+                f"estimate_chunk: {t2-t1:.4f}s | "
+                f"select_layer_past: {t3-t2:.4f}s | "
+                f"compact_cache: {t4-t3:.4f}s | "
+                f"create_mask: {t5-t4:.4f}s | "
+                f"forward: {forward_time:.4f}s | "
+                f"update_cache: {t7-t6:.4f}s"
+            )
             
             return (output_hidden_states,)
 
