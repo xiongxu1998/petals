@@ -77,7 +77,8 @@ def benchmark_inference(process_idx, args, result_pipe):
     time = perf_counter() - start_time
     generated_tokens_num = result.shape[1] - input_ids.shape[1]
     speed = generated_tokens_num / time
-    logger.info(f"benchmark_inference, result: {result}, generated_tokens_num: {generated_tokens_num}, time: {time} speed: {speed}")
+    decoded_result = tokenizer.decode(result[0], skip_special_tokens=True)
+    logger.info(f"benchmark_inference, result: {result}, generated_tokens_num: {generated_tokens_num}, time: {time} speed: {speed}, decoded_result: {decoded_result}")
     result_pipe.send(speed)
 
 

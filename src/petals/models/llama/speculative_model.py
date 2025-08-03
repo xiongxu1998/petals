@@ -36,7 +36,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         max_tree_depth: int = 3,
         use_kv_cache: bool = True,
         kv_cache_window: int = 2048,
-        max_new_tokens: int = 50,
+        max_new_tokens: int = 128,
         **model_kwargs,
     ) -> torch.LongTensor:
         
@@ -78,10 +78,10 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         session: InferenceSession,
         streamer: Optional["BaseStreamer"],
         beam_width: int = 2,
-        max_tree_depth: int = 2,
+        max_tree_depth: int = 3,
         use_kv_cache: bool = True,
         kv_cache_window: int = 2048,
-        max_new_tokens: int = 50,
+        max_new_tokens: int = 128,
         **model_kwargs,
     ) -> torch.LongTensor:
         logger.info("Starting speculative decoding with distributed inference session!")
