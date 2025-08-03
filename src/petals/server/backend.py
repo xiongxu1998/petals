@@ -136,7 +136,7 @@ class TransformerBackend(ModuleBackend):
             output_hidden_states = torch.empty_like(hidden_states) if seq_len > max_chunk_length else None
             t2 = time.time()
             
-            logger.info(f"inference_step, prefix_len: {inference_info.prefix_length}, kv_cache_position_ids: {inference_info.kv_cache_position_ids}")
+            # logger.info(f"inference_step, prefix_len: {inference_info.prefix_length}, kv_cache_position_ids: {inference_info.kv_cache_position_ids}")
             
             # 1. 选择需要的 cache（返回两个值）
             layer_past, new_position_mapping = self._select_layer_past(
@@ -198,16 +198,16 @@ class TransformerBackend(ModuleBackend):
             t7 = time.time()
             
             # 打印时间统计
-            logger.info(
-                f"[Timing] inference_step total: {t7-t0:.4f}s | "
-                f"reorder_cache: {t1-t0:.4f}s | "
-                f"estimate_chunk: {t2-t1:.4f}s | "
-                f"select_layer_past: {t3-t2:.4f}s | "
-                f"compact_cache: {t4-t3:.4f}s | "
-                f"create_mask: {t5-t4:.4f}s | "
-                f"forward: {forward_time:.4f}s | "
-                f"update_cache: {t7-t6:.4f}s"
-            )
+            # logger.info(
+            #     f"[Timing] inference_step total: {t7-t0:.4f}s | "
+            #     f"reorder_cache: {t1-t0:.4f}s | "
+            #     f"estimate_chunk: {t2-t1:.4f}s | "
+            #     f"select_layer_past: {t3-t2:.4f}s | "
+            #     f"compact_cache: {t4-t3:.4f}s | "
+            #     f"create_mask: {t5-t4:.4f}s | "
+            #     f"forward: {forward_time:.4f}s | "
+            #     f"update_cache: {t7-t6:.4f}s"
+            # )
             
             return (output_hidden_states,)
 
@@ -236,7 +236,7 @@ class TransformerBackend(ModuleBackend):
             cached_mask = self._tree_mask_cache[cache_key]
             if cached_mask.device != device:
                 cached_mask = cached_mask.to(device)
-            logger.info(f"Using cached tree mask for key {cache_key}")
+            # logger.info(f"Using cached tree mask for key {cache_key}")
             return cached_mask
         
         # 解析 tree_attention_mask
@@ -252,7 +252,7 @@ class TransformerBackend(ModuleBackend):
         
         # 缓存解析后的 mask
         self._tree_mask_cache[cache_key] = tree_mask  # 存储在 CPU 上以节省 GPU 内存
-        logger.info(f"Cached new tree mask for key {cache_key}, cache size: {len(self._tree_mask_cache)}")
+        # logger.info(f"Cached new tree mask for key {cache_key}, cache size: {len(self._tree_mask_cache)}")
         
         return tree_mask
                 
@@ -414,6 +414,7 @@ class TransformerBackend(ModuleBackend):
 
     def _select_layer_past(self, cache_tensors: Sequence[torch.Tensor], prefix_length: int, kv_cache_position_ids: Optional[torch.Tensor] = None) -> Tuple[Sequence[torch.Tensor], Optional[torch.Tensor]]:
         """Extract first {prefix_length} tokens and optionally specific positions based on kv_cache_position_ids"""
+        start_time = time.time()
         key_cache, value_cache = list(cache_tensors[0::2]), list(cache_tensors[1::2])
         new_position_mapping = None  # 用于记录新的位置映射
         
@@ -426,11 +427,11 @@ class TransformerBackend(ModuleBackend):
                 key_cache[i] = k[:, :, :prefix_length]
                 value_cache[i] = v[:, :prefix_length, :]
                 
-                logger.info(
-                    f"[KV] L{i:02d} prefix key shape {tuple(key_cache[i].shape)} "
-                    f"value shape {tuple(value_cache[i].shape)} "
-                    f"prefix_length={prefix_length}"
-                )
+                # logger.info(
+                #     f"[KV] L{i:02d} prefix key shape {tuple(key_cache[i].shape)} "
+                #     f"value shape {tuple(value_cache[i].shape)} "
+                #     f"prefix_length={prefix_length}"
+                # )
         else:
             # 预处理 position_ids
             position_ids = kv_cache_position_ids.to(cache_tensors[0].device)
@@ -448,6 +449,10 @@ class TransformerBackend(ModuleBackend):
             tree_positions = position_ids[0]  # 假设所有batch相同
             complete_positions = torch.cat([prefix_positions, tree_positions])
             
+            pre_handle_time = time.time()
+            
+            # logger.info(f"pre_handle_time: {pre_handle_time - start_time}")
+            
             # 检查是否是连续序列
             is_continuous = False
             continuous_length = 0
@@ -457,8 +462,8 @@ class TransformerBackend(ModuleBackend):
                 expected_continuous = torch.arange(len(complete_positions), device=position_ids.device)
                 is_continuous = torch.equal(complete_positions, expected_continuous)
                 continuous_length = len(complete_positions)
-                
-                logger.info(f"Position analysis: is_continuous={is_continuous}, length={continuous_length}")
+                check_continuous_time = time.time()
+                # logger.info(f"Position analysis: is_continuous={is_continuous}, length={continuous_length}, check_continuous_time: {check_continuous_time - pre_handle_time}")
             
             # 根据位置模式选择优化策略
             if is_continuous:
@@ -470,12 +475,13 @@ class TransformerBackend(ModuleBackend):
                     key_cache[i] = k[:, :, :continuous_length]
                     value_cache[i] = v[:, :continuous_length, :]
                     
-                    logger.info(
-                        f"[KV] L{i:02d} continuous slice - key shape {tuple(key_cache[i].shape)} "
-                        f"value shape {tuple(value_cache[i].shape)}"
-                    )
-                
-                new_position_mapping = torch.arange(continuous_length, device=position_ids.device)
+                    # logger.info(
+                    #     f"[KV] L{i:02d} continuous slice - key shape {tuple(key_cache[i].shape)} "
+                    #     f"value shape {tuple(value_cache[i].shape)}"
+                    # )
+                # final_handle_time = time.time()
+                # logger.info(f"final_handle_time: {final_handle_time - check_continuous_time}")
+                # new_position_mapping = torch.arange(continuous_length, device=position_ids.device)
             else:
                 # 非连续情况：需要使用索引
                 # 检查是否所有batch的位置相同
@@ -494,12 +500,12 @@ class TransformerBackend(ModuleBackend):
                         key_cache[i] = selected_key
                         value_cache[i] = selected_value
                         
-                        logger.info(
-                            f"[KV] L{i:02d} index_select - key shape {tuple(selected_key.shape)} "
-                            f"value shape {tuple(selected_value.shape)}"
-                        )
+                        # logger.info(
+                        #     f"[KV] L{i:02d} index_select - key shape {tuple(selected_key.shape)} "
+                        #     f"value shape {tuple(selected_value.shape)}"
+                        # )
                     
-                    new_position_mapping = torch.arange(len(complete_positions), device=position_ids.device)
+                    # new_position_mapping = torch.arange(len(complete_positions), device=position_ids.device)
                 else:
                     # 不同batch有不同位置，需要更复杂的处理
                     # 这里保留原有的复杂逻辑，但可以进一步优化
@@ -548,14 +554,18 @@ class TransformerBackend(ModuleBackend):
                             key_cache[i] = padded_key
                             value_cache[i] = padded_value
                         
-                        if i == 0:
-                            new_position_mapping = torch.arange(max_length, device=position_ids.device)
+                        # if i == 0:
+                        #     new_position_mapping = torch.arange(max_length, device=position_ids.device)
         
+        # before_pack_time = time.time()
         layer_past = tuple(chain(*zip(key_cache, value_cache)))
-        logger.info(f"cache_tensors size: {len(cache_tensors)}, selected layer_past size: {len(layer_past)}")
+        # logger.info(f"cache_tensors size: {len(cache_tensors)}, selected layer_past size: {len(layer_past)}")
         
         # 返回 cache 和新的长度信息
         result = PerDeviceTensors(*layer_past) if len(self.module.module_shards) > 1 else layer_past
+        
+        # pack_result_time = time.time()
+        # logger.info(f"pack_result_time: {pack_result_time - start_time}")
         return result, new_position_mapping
 
     def _update_cache_inplace(

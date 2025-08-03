@@ -102,9 +102,9 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         result = ""
         llm_generated_token = None
         while not finished and current_input_ids.shape[1] < input_ids.shape[1] + max_new_tokens:
-            logger.info(f"\n==================== STEP {step_idx} ====================")
-            logger.info(f"[DEBUG] Current sequence length: {current_input_ids.shape[1]}")
-            logger.info(f"[DEBUG] Session position: {session.position}")
+            # logger.info(f"\n==================== STEP {step_idx} ====================")
+            # logger.info(f"[DEBUG] Current sequence length: {current_input_ids.shape[1]}")
+            # logger.info(f"[DEBUG] Session position: {session.position}")
             
             # 1. Build speculative trees using SSM
             spec_trees = self._build_speculative_trees_batched(
@@ -163,7 +163,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
             unfinished_sequences = unfinished_sequences & ~stopping_criteria(current_input_ids, None)
             finished = unfinished_sequences.max() == 0
             step_idx += 1
-            logger.info(f"finished: {finished}, current_input_ids.shape[1]: {current_input_ids.shape[1]}, input_ids.shape[1]: {input_ids.shape[1]}, max_new_tokens: {max_new_tokens}")
+            # logger.info(f"finished: {finished}, current_input_ids.shape[1]: {current_input_ids.shape[1]}, input_ids.shape[1]: {input_ids.shape[1]}, max_new_tokens: {max_new_tokens}")
 
         if streamer is not None:
             streamer.end()
@@ -189,9 +189,9 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
             trees, input_ids, input_ids.device
         )
         
-        logger.info(f"[DEBUG] Tree tokens shape: {tree_tokens.shape}")
-        logger.info(f"[DEBUG] Tree tokens: {tree_tokens}")
-        logger.info(f"[DEBUG] Active session position: {self.transformer.h.active_session.position if self.transformer.h.active_session else 'None'}")
+        # logger.info(f"[DEBUG] Tree tokens shape: {tree_tokens.shape}")
+        # logger.info(f"[DEBUG] Tree tokens: {tree_tokens}")
+        # logger.info(f"[DEBUG] Active session position: {self.transformer.h.active_session.position if self.transformer.h.active_session else 'None'}")
         
         if attention_mask is None or tree_tokens.shape[1] == 0:
             logger.warning("No tree tokens to verify, falling back to regular generation")
@@ -217,7 +217,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
             elif is_first_iteration or past_key_values is None:
                 # First iteration: process full sequence to establish cache
                 full_sequence = torch.cat([input_ids, tree_tokens], dim=-1)
-                logger.info(f"[DEBUG] First iteration - processing full sequence of length: {full_sequence.shape[1]}")
+                # logger.info(f"[DEBUG] First iteration - processing full sequence of length: {full_sequence.shape[1]}")
                 
                 outputs = self(
                     input_ids=full_sequence,
@@ -239,7 +239,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                 if self.transformer.h.active_session:
                     new_past_key_values.update_seen(self.transformer.h.active_session.position)
                 
-                logger.info(f"[DEBUG] First iteration completed, session position: {self.transformer.h.active_session.position if self.transformer.h.active_session else 'None'}")
+                # logger.info(f"[DEBUG] First iteration completed, session position: {self.transformer.h.active_session.position if self.transformer.h.active_session else 'None'}")
                 
             else:
                 # Subsequent iterations: use existing cache
@@ -251,9 +251,9 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                 if active_session.position > kv_cache_window:
                     trim_amount = active_session.position - kv_cache_window
                     active_session.position = kv_cache_window
-                    logger.info(f"Trimmed cache: reset position from {active_session.position + trim_amount} to {kv_cache_window}")
+                    # logger.info(f"Trimmed cache: reset position from {active_session.position + trim_amount} to {kv_cache_window}")
                 
-                logger.info(f"[DEBUG] Subsequent iteration - processing tree tokens of length: {tree_tokens.shape[1]}")
+                # logger.info(f"[DEBUG] Subsequent iteration - processing tree tokens of length: {tree_tokens.shape[1]}")
                 if llm_generated_token is None:
                     full_sequence = tree_tokens
                 else:
@@ -271,13 +271,13 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                 new_past_key_values = past_key_values
                 new_past_key_values.update_seen(active_session.position)
                 
-                logger.info(f"[DEBUG] Subsequent iteration completed, session position: {active_session.position}")
+                # logger.info(f"[DEBUG] Subsequent iteration completed, session position: {active_session.position}")
         
         # Extract verification results
         verified_tokens, verified_tokens_positions, llm_generated_token = self._extract_best_verified_paths_fixed(
             logits, batch_node_paths, input_ids, logits_processor, tree_tokens.shape[1]
         )
-        logger.info(f"[DEBUG] Verified tokens (per batch): {verified_tokens.tolist() if verified_tokens is not None else None}, verified_tokens_positions: {verified_tokens_positions}, llm_generated_token: {llm_generated_token}")
+        # logger.info(f"[DEBUG] Verified tokens (per batch): {verified_tokens.tolist() if verified_tokens is not None else None}, verified_tokens_positions: {verified_tokens_positions}, llm_generated_token: {llm_generated_token}")
         return verified_tokens, verified_tokens_positions, new_past_key_values, llm_generated_token
     
     def pack_bool_mask_to_int64(self, mask_bool: torch.Tensor) -> torch.Tensor:
@@ -323,7 +323,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
             else:
                 next_token = torch.argmax(processed_logits, dim=-1, keepdim=True)
             
-            logger.info(f"[DEBUG] Fallback generated token: {next_token.tolist()}")
+            # logger.info(f"[DEBUG] Fallback generated token: {next_token.tolist()}")
             return next_token
             
         except Exception as e:
@@ -343,12 +343,12 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         """Build speculative trees using the small model (SSM)"""
         batch_size = input_ids.shape[0]
         trees = []
-        logger.info(f"Building trees for batch_size: {batch_size}")
+        # logger.info(f"Building trees for batch_size: {batch_size}")
         # tokenizer = AutoTokenizer.from_pretrained("huggyllama/llama-7b", use_fast=False)
         for batch_idx in range(batch_size):
             root_token = input_ids[batch_idx, -1].item()
             tree = SpeculativeTree(root_token, f"req_{batch_idx}")
-            logger.info(f"[DEBUG] (batch {batch_idx}) root token: {root_token}")
+            # logger.info(f"[DEBUG] (batch {batch_idx}) root token: {root_token}")
             
             for depth in range(max_depth):
                 current_nodes = tree.get_nodes_at_depth(depth)
@@ -430,7 +430,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                     logger.warning(f"Failed to add tree layer: {e}")
                     break
             
-            logger.info(f"[DEBUG] batch {batch_idx} finished tree structure")
+            # logger.info(f"[DEBUG] batch {batch_idx} finished tree structure")
             trees.append(tree)
         
         return trees
@@ -489,9 +489,9 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                 best_positions = verified_positions
         
         # Handle empty verification case
-        logger.info(f"_extract_best_verified_paths_fixed, best_verified: {best_verified}, best_positions: {best_positions}, logits: {logits.shape}, fallback_pos: {fallback_pos}, input_ids.shape: {input_ids.shape}")
+        # logger.info(f"_extract_best_verified_paths_fixed, best_verified: {best_verified}, best_positions: {best_positions}, logits: {logits.shape}, fallback_pos: {fallback_pos}, input_ids.shape: {input_ids.shape}")
         if len(best_verified) == 0:
-            logger.warning("No tokens verified, using reverse indexing for fallback")
+            # logger.warning("No tokens verified, using reverse indexing for fallback")
             
             # 生成fallback token
             final_logits = logits[0, fallback_pos-1:fallback_pos]  # 取单个位置的logits
@@ -505,7 +505,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
             kv_cache_position_ids = torch.tensor([tree_root_position], 
                                             device=logits.device)
             
-            logger.info(f"[DEBUG] Fallback kv_cache_position_ids: {kv_cache_position_ids.tolist()}")
+            # logger.info(f"[DEBUG] Fallback kv_cache_position_ids: {kv_cache_position_ids.tolist()}")
             llm_generated_token = torch.tensor([next_token], device=logits.device)
             return None, kv_cache_position_ids, llm_generated_token
         
@@ -543,6 +543,6 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         all_positions = [tree_root_position] + best_positions
         kv_cache_position_ids = torch.tensor(all_positions, device=logits.device)
         
-        logger.info(f"[DEBUG] Final kv_cache_position_ids: {kv_cache_position_ids.tolist()}")
+        # logger.info(f"[DEBUG] Final kv_cache_position_ids: {kv_cache_position_ids.tolist()}")
         
         return verified_tensor, kv_cache_position_ids, llm_generated_token

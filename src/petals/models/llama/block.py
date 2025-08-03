@@ -111,7 +111,7 @@ class OptimizedLlamaAttention(LlamaAttention):
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:
-            logger.info(f"OptimizedLlamaAttention, attention_mask: {attention_mask.shape}, attn_weights: {attn_weights.shape}")
+            # logger.info(f"OptimizedLlamaAttention, attention_mask: {attention_mask.shape}, attn_weights: {attn_weights.shape}")
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32

@@ -204,7 +204,7 @@ async def iterate_rpc_inference(
                 
         batch_size, length_increment, _ = hidden_states.shape
         
-        logger.info(f"iterate_rpc_inference, kv_cache_position_ids: {kv_cache_position_ids}, tree_attention_mask: {tree_attention_mask}")
+        # logger.info(f"iterate_rpc_inference, kv_cache_position_ids: {kv_cache_position_ids}, tree_attention_mask: {tree_attention_mask}")
 
         # Cast inputs to backend dtype
         hidden_states = hidden_states.to(requested_backends[0].dtype)
