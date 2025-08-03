@@ -5,6 +5,7 @@ from itertools import chain
 from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import torch
+import time
 from hivemind import BatchTensorDescriptor, TensorDescriptor
 from hivemind.moe.expert_uid import ExpertUID
 from hivemind.moe.server.module_backend import ModuleBackend
@@ -84,6 +85,9 @@ class TransformerBackend(ModuleBackend):
         self.cache_bytes_per_token: Dict[torch.device, int] = Counter()
         for descr in self.get_inference_cache_descriptors(batch_size=1, max_length=1):
             self.cache_bytes_per_token[descr.device] += descr.numel() * get_size_in_bytes(descr.dtype)
+        
+        # 缓存解析后的 tree_attention_mask
+        self._tree_mask_cache: Dict[int, torch.Tensor] = {}  # key: hash of packed mask, value: unpacked tree mask
 
     def get_inference_cache_descriptors(self, batch_size: int, max_length: int) -> Sequence[TensorDescriptor]:
         """Create tensor descriptors for attention cache tensors used during inference_step"""
@@ -121,11 +125,16 @@ class TransformerBackend(ModuleBackend):
         with self.memory_cache.use_cache(
             *inference_info.cache_handles
         ) as cache_tensors, self._peft_module.using_adapter(inference_info.active_adapter):
+            # 时间记录
+            t0 = time.time()
+            
             self._reorder_cache_inplace(cache_tensors, hypo_ids)
-
+            t1 = time.time()
+            
             # 估算最大块长度
             max_chunk_length = self._estimate_max_chunk_length(hidden_states, inference_info)
             output_hidden_states = torch.empty_like(hidden_states) if seq_len > max_chunk_length else None
+            t2 = time.time()
             
             logger.info(f"inference_step, prefix_len: {inference_info.prefix_length}, kv_cache_position_ids: {inference_info.kv_cache_position_ids}")
             
@@ -135,6 +144,7 @@ class TransformerBackend(ModuleBackend):
                 inference_info.prefix_length, 
                 inference_info.kv_cache_position_ids
             )
+            t3 = time.time()
             
             # 2. 获取 past_key_values 的长度
             past_key_values_length = 0
@@ -147,6 +157,7 @@ class TransformerBackend(ModuleBackend):
                 # 这里需要将 layer_past 的内容写回 cache_tensors 的前面部分
                 # 使其在物理上连续存储
                 self._compact_cache_inplace(cache_tensors, layer_past, past_key_values_length)
+            t4 = time.time()
             
             # 4. 创建 attention mask
             full_mask = self._create_attention_mask(
@@ -156,19 +167,23 @@ class TransformerBackend(ModuleBackend):
                 device=hidden_states.device,
             )
             attention_mask = self.convert_mask_to_scores(full_mask) if full_mask is not None else None
+            t5 = time.time()
             
-            logger.info(f"inference_step, layer_past: {layer_past}")
+            # logger.info(f"inference_step, layer_past: {layer_past}")
             
             # 5. 分块处理
+            forward_time = 0
             for offset in range(0, seq_len, max_chunk_length):
                 hidden_states_chunk = hidden_states[:, offset : offset + max_chunk_length, :]
                 
+                t_forward_start = time.time()
                 output_hidden_states_chunk, new_kvs = self.module.forward(
                     hidden_states_chunk, 
                     layer_past=layer_past, 
                     attention_mask=attention_mask, 
                     use_cache=True
                 )
+                forward_time += time.time() - t_forward_start
                 
                 if seq_len > max_chunk_length:
                     output_hidden_states[:, offset : offset + max_chunk_length] = output_hidden_states_chunk
@@ -176,9 +191,23 @@ class TransformerBackend(ModuleBackend):
                     output_hidden_states = output_hidden_states_chunk
                 
                 layer_past = new_kvs
+            t6 = time.time()
 
             # 6. 最后更新 cache（将新生成的 KV 写入）
             self._update_cache_inplace(cache_tensors, new_kvs, past_key_values_length)
+            t7 = time.time()
+            
+            # 打印时间统计
+            logger.info(
+                f"[Timing] inference_step total: {t7-t0:.4f}s | "
+                f"reorder_cache: {t1-t0:.4f}s | "
+                f"estimate_chunk: {t2-t1:.4f}s | "
+                f"select_layer_past: {t3-t2:.4f}s | "
+                f"compact_cache: {t4-t3:.4f}s | "
+                f"create_mask: {t5-t4:.4f}s | "
+                f"forward: {forward_time:.4f}s | "
+                f"update_cache: {t7-t6:.4f}s"
+            )
             
             return (output_hidden_states,)
 
@@ -195,6 +224,37 @@ class TransformerBackend(ModuleBackend):
         if not is_dummy(hypo_ids):
             for cache_tensor in cache_tensors:
                 cache_tensor[...] = cache_tensor[hypo_ids.to(cache_tensor.device)]  # in-place reorder cache by hypo ids
+    
+    def _get_tree_mask_from_cache(self, tree_attention_mask: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """从缓存中获取解析后的 tree mask，如果不存在则解析并缓存"""
+        # 计算 tree_attention_mask 的哈希值作为缓存键
+        # 使用 tensor 的数据指针和形状作为键，因为内容相同的 tensor 会有相同的表示
+        cache_key = hash((tree_attention_mask.data_ptr(), tree_attention_mask.shape, tree_attention_mask.stride()))
+        
+        if cache_key in self._tree_mask_cache:
+            # 从缓存中获取并移动到正确的设备
+            cached_mask = self._tree_mask_cache[cache_key]
+            if cached_mask.device != device:
+                cached_mask = cached_mask.to(device)
+            logger.info(f"Using cached tree mask for key {cache_key}")
+            return cached_mask
+        
+        # 解析 tree_attention_mask
+        if hasattr(torch, "unpackbits"):
+            bits = torch.unpackbits(tree_attention_mask.to(device), dim=-1)
+        else:
+            bits = self._unpackbits_fallback(tree_attention_mask.to(device), dim=-1)
+        
+        # bits: [B, tree_len, n_chunks, 64]
+        bits = bits.flatten(start_dim=-3)            # [B, tree_len, n_chunks*64]
+        tree_len = bits.size(1)
+        tree_mask = bits[..., :tree_len].bool()      # [B, tree_len, tree_len]
+        
+        # 缓存解析后的 mask
+        self._tree_mask_cache[cache_key] = tree_mask  # 存储在 CPU 上以节省 GPU 内存
+        logger.info(f"Cached new tree mask for key {cache_key}, cache size: {len(self._tree_mask_cache)}")
+        
+        return tree_mask
                 
     def _create_attention_mask(
         self,
@@ -207,64 +267,78 @@ class TransformerBackend(ModuleBackend):
         if tree_attention_mask is None or is_dummy(tree_attention_mask):
             return None
 
-        # ---- 1. 解包树段 ----
+        # ---- 1. 解包树段（使用缓存）----
         if tree_attention_mask.dtype != torch.uint8:
             raise TypeError("tree_attention_mask should be uint8 packed")
 
-        if hasattr(torch, "unpackbits"):
-            bits = torch.unpackbits(tree_attention_mask.to(device), dim=-1)
-        else:
-            bits = self._unpackbits_fallback(tree_attention_mask.to(device), dim=-1)
-
-        # bits: [B, tree_len, n_chunks, 64]
-        # logger.info(f"bits: {bits}")
-        bits = bits.flatten(start_dim=-3)            # [B, tree_len, n_chunks*64]
-        tree_len = bits.size(1)
-        tree_mask = bits[..., :tree_len].bool()      # [B, tree_len, tree_len]
-
-        # ---- 2. 计算前缀长度并构造完整mask ----
-        prefix_len = src_len - tree_len
+        # 从缓存中获取解析后的 tree_mask
+        tree_mask = self._get_tree_mask_from_cache(tree_attention_mask, device)
+        tree_len = tree_mask.size(1)
         B = tree_mask.size(0)
 
-        # 构造完整的attention mask [B, src_len, src_len]
-        full_mask = torch.zeros(B, src_len, src_len, dtype=torch.bool, device=device)
-        
-        # 前缀部分：标准下三角矩阵（严格因果性）
-        # 第0行：只有[0]位置为True（只能看到自己）
-        # 第1行：只有[0,1]位置为True（能看到前面的和自己）
-        # 以此类推...
-        if prefix_len > 0:
-            prefix_mask = torch.tril(torch.ones(prefix_len, prefix_len, dtype=torch.bool, device=device))
-            full_mask[:, :prefix_len, :prefix_len] = prefix_mask
-            
-            # 前缀对树段的可见性：前缀token不能看到后面的树段token（保持因果性）
-            # full_mask[:, :prefix_len, prefix_len:] 保持为False（已经初始化为0）
-        
-        # 树段对前缀的可见性：树段的每个token都能看到所有前缀token
-        if prefix_len > 0 and tree_len > 0:
-            full_mask[:, prefix_len:, :prefix_len] = True
-        
-        # 树段内部的可见性：使用解包后的tree_mask
-        if tree_len > 0:
-            full_mask[:, prefix_len:, prefix_len:] = tree_mask
-
-        # ---- 3. 只保留当前tokens对应的行 ----
-        # 当前token数量 = src_len - past_key_values_length
+        # ---- 2. 计算关键参数 ----
+        prefix_len = src_len - tree_len
         current_token_count = src_len - past_key_values_length
         
         if current_token_count <= 0:
-            # 如果没有当前tokens，返回None
             return None
         
-        # 只保留最后current_token_count行
-        # 这些行对应当前step需要计算attention的tokens
-        current_mask = full_mask[:, -current_token_count:, :]  # [B, current_token_count, src_len]
+        # ---- 3. 优化：分两种常见情况处理 ----
         
-        logger.info(f"Original mask shape: {full_mask.shape}, "
-                    f"Current mask shape: {current_mask.shape}, "
-                    f"src_len: {src_len}, past_key_values_length: {past_key_values_length}")
-
-        return current_mask
+        # 情况A: 第一次forward (past_key_values_length = 0)
+        if past_key_values_length == 0:
+            # 需要构建完整mask，但只返回需要的部分
+            # 这种情况下 current_token_count = src_len
+            full_mask = torch.zeros(B, src_len, src_len, dtype=torch.bool, device=device)
+            
+            # 前缀部分：因果mask（向量化）
+            if prefix_len > 0:
+                causal_indices = torch.tril_indices(prefix_len, prefix_len, device=device)
+                full_mask[:, causal_indices[0], causal_indices[1]] = True
+            
+            # 树对前缀的可见性
+            if prefix_len > 0 and tree_len > 0:
+                full_mask[:, prefix_len:, :prefix_len] = True
+            
+            # 树内部可见性
+            if tree_len > 0:
+                full_mask[:, prefix_len:, prefix_len:] = tree_mask
+            
+            return full_mask
+        
+        # 情况B: 后续的增量生成 (通常 current_token_count 很小)
+        else:
+            # 直接构建小的current_mask
+            current_mask = torch.zeros(B, current_token_count, src_len, dtype=torch.bool, device=device)
+            
+            # 判断当前token的位置
+            start_pos = past_key_values_length
+            
+            # 如果还在前缀部分（较少见）
+            if start_pos < prefix_len:
+                prefix_tokens = min(current_token_count, prefix_len - start_pos)
+                # 因果mask
+                for i in range(prefix_tokens):
+                    current_mask[:, i, :start_pos + i + 1] = True
+                
+                # 如果有token进入树部分
+                if current_token_count > prefix_tokens:
+                    tree_tokens = current_token_count - prefix_tokens
+                    # 树token可以看到所有前缀
+                    current_mask[:, prefix_tokens:, :prefix_len] = True
+                    # 树内部可见性
+                    current_mask[:, prefix_tokens:, prefix_len:] = tree_mask[:, :tree_tokens, :]
+            
+            # 如果都在树部分（最常见）
+            else:
+                tree_start = start_pos - prefix_len
+                # 所有当前token都可以看到前缀
+                if prefix_len > 0:
+                    current_mask[:, :, :prefix_len] = True
+                # 树内部可见性
+                current_mask[:, :, prefix_len:] = tree_mask[:, tree_start:tree_start + current_token_count, :]
+            
+            return current_mask
     
     def convert_mask_to_scores(self, mask: torch.Tensor) -> torch.Tensor:
         """
