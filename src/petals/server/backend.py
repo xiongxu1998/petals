@@ -417,106 +417,12 @@ class TransformerBackend(ModuleBackend):
         key_cache, value_cache = list(cache_tensors[0::2]), list(cache_tensors[1::2])
         new_position_mapping = None  # 用于记录新的位置映射
         
-        for i in range(len(key_cache)):
-            # 首先获取原始的 key 和 value cache
-            key_cache[i] = key_cache[i].flatten(0, 1)  # [batch * num_kv_heads, head_dim, total_length]
-            value_cache[i] = value_cache[i].flatten(0, 1)  # [batch * num_kv_heads, total_length, head_dim]
-            
-            k, v = key_cache[i], value_cache[i]
-            
-            # 如果提供了 kv_cache_position_ids，需要选择特定位置的 cache
-            if kv_cache_position_ids is not None and not is_dummy(kv_cache_position_ids):
-                logger.info(f"Selecting KV cache using position_ids: {kv_cache_position_ids}")
+        # 快速路径：如果没有position_ids，直接切片
+        if kv_cache_position_ids is None or is_dummy(kv_cache_position_ids):
+            for i in range(len(key_cache)):
+                k = key_cache[i].flatten(0, 1)
+                v = value_cache[i].flatten(0, 1)
                 
-                # kv_cache_position_ids 的形状应该是 [batch_size, num_positions] 或 [num_positions]
-                position_ids = kv_cache_position_ids.to(k.device)
-                
-                # 确保 position_ids 是 2D 的
-                if position_ids.dim() == 1:
-                    # 如果是 1D，假设 batch_size = 1
-                    position_ids = position_ids.unsqueeze(0)  # [1, num_positions]
-                
-                batch_size = position_ids.shape[0]
-                num_tree_positions = position_ids.shape[1]
-                num_kv_heads = k.shape[0] // batch_size
-                
-                # 构建完整的位置列表：前文 + 树节点
-                all_positions_list = []
-                continuous_positions_list = []  # 新的连续位置列表
-                
-                for batch_idx in range(batch_size):
-                    batch_positions = position_ids[batch_idx]  # [num_tree_positions]
-                    
-                    # 根节点位置是第0个元素
-                    root_position = batch_positions[0].item()
-                    
-                    # 前文位置：0 到 root_position-1
-                    prefix_positions = torch.arange(0, root_position, device=position_ids.device)
-                    
-                    # 合并前文位置和树位置
-                    complete_positions = torch.cat([prefix_positions, batch_positions])
-                    logger.info(f"_select_layer_past, complete_positions: {complete_positions}")
-                    
-                    # 创建连续的新位置映射
-                    continuous_positions = torch.arange(len(complete_positions), device=position_ids.device)
-                    
-                    all_positions_list.append(complete_positions)
-                    continuous_positions_list.append(continuous_positions)
-                
-                # 找到最大长度，用于填充
-                max_length = max(len(pos) for pos in all_positions_list)
-                
-                # 创建填充后的位置张量
-                padded_positions = torch.zeros(batch_size, max_length, dtype=torch.long, device=position_ids.device)
-                position_mask = torch.zeros(batch_size, max_length, dtype=torch.bool, device=position_ids.device)
-                
-                for batch_idx, positions in enumerate(all_positions_list):
-                    seq_len = len(positions)
-                    padded_positions[batch_idx, :seq_len] = positions
-                    position_mask[batch_idx, :seq_len] = True
-                
-                # 确保位置索引在有效范围内
-                padded_positions = torch.clamp(padded_positions, 0, k.shape[2] - 1)
-                
-                # 展开 position_ids 以匹配所有头
-                expanded_positions = padded_positions.repeat_interleave(num_kv_heads, dim=0)  # [batch*num_kv_heads, max_length]
-                expanded_mask = position_mask.repeat_interleave(num_kv_heads, dim=0)  # [batch*num_kv_heads, max_length]
-                
-                # 使用 gather 操作选择对应位置的 cache
-                # key cache: 在第2维(seq_len维)上选择
-                selected_key = torch.gather(k, 2, expanded_positions.unsqueeze(1).expand(-1, k.shape[1], -1))
-                
-                # value cache: 在第1维(seq_len维)上选择  
-                selected_value = torch.gather(v, 1, expanded_positions.unsqueeze(2).expand(-1, -1, v.shape[2]))
-                
-                # 应用mask，将无效位置设为0
-                if expanded_mask.any():
-                    mask_key = expanded_mask.unsqueeze(1).expand(-1, k.shape[1], -1)
-                    mask_value = expanded_mask.unsqueeze(2).expand(-1, -1, v.shape[2])
-                    selected_key = selected_key * mask_key.to(selected_key.dtype)
-                    selected_value = selected_value * mask_value.to(selected_value.dtype)
-                
-                # 只保留有效的部分（去除padding）
-                valid_length = max(len(pos) for pos in all_positions_list)
-                selected_key = selected_key[:, :, :valid_length]
-                selected_value = selected_value[:, :valid_length, :]
-                
-                key_cache[i] = selected_key
-                value_cache[i] = selected_value
-                
-                # 记录新的位置映射（用于下次推理）
-                if i == 0:  # 只需要记录一次
-                    new_position_mapping = torch.arange(valid_length, device=position_ids.device)
-                
-                logger.info(
-                    f"[KV] L{i:02d} selected key shape {tuple(selected_key.shape)} "
-                    f"value shape {tuple(selected_value.shape)} "
-                    f"root_positions: {[pos[0].item() for pos in all_positions_list]} "
-                    f"total_positions: {[len(pos) for pos in all_positions_list]} "
-                    f"compacted to continuous length: {valid_length}"
-                )
-            else:
-                # 原有逻辑：只选择前 prefix_length 个 tokens
                 key_cache[i] = k[:, :, :prefix_length]
                 value_cache[i] = v[:, :prefix_length, :]
                 
@@ -525,16 +431,125 @@ class TransformerBackend(ModuleBackend):
                     f"value shape {tuple(value_cache[i].shape)} "
                     f"prefix_length={prefix_length}"
                 )
+        else:
+            # 预处理 position_ids
+            position_ids = kv_cache_position_ids.to(cache_tensors[0].device)
+            if position_ids.dim() == 1:
+                position_ids = position_ids.unsqueeze(0)
             
-            # 打印调试信息
-            k, v = key_cache[i], value_cache[i]
-            sample_k = k.flatten()[0].item() if k.numel() else float('nan')
-            sample_v = v.flatten()[0].item() if v.numel() else float('nan')
-            logger.info(
-                f"[KV] L{i:02d} final key shape {tuple(k.shape)} "
-                f"value shape {tuple(v.shape)} "
-                f"sample k={sample_k:.4g} v={sample_v:.4g}"
-            )
+            batch_size = position_ids.shape[0]
+            
+            # 分析位置模式
+            # 假设第一个位置是根节点，需要包含它之前的所有前缀
+            root_position = position_ids[0, 0].item()
+            
+            # 构建完整位置（前缀 + 树节点）
+            prefix_positions = torch.arange(0, root_position, device=position_ids.device)
+            tree_positions = position_ids[0]  # 假设所有batch相同
+            complete_positions = torch.cat([prefix_positions, tree_positions])
+            
+            # 检查是否是连续序列
+            is_continuous = False
+            continuous_length = 0
+            
+            if len(complete_positions) > 0:
+                # 检查是否是从0开始的连续序列
+                expected_continuous = torch.arange(len(complete_positions), device=position_ids.device)
+                is_continuous = torch.equal(complete_positions, expected_continuous)
+                continuous_length = len(complete_positions)
+                
+                logger.info(f"Position analysis: is_continuous={is_continuous}, length={continuous_length}")
+            
+            # 根据位置模式选择优化策略
+            if is_continuous:
+                # 最优情况：位置是连续的，直接切片
+                for i in range(len(key_cache)):
+                    k = key_cache[i].flatten(0, 1)
+                    v = value_cache[i].flatten(0, 1)
+                    
+                    key_cache[i] = k[:, :, :continuous_length]
+                    value_cache[i] = v[:, :continuous_length, :]
+                    
+                    logger.info(
+                        f"[KV] L{i:02d} continuous slice - key shape {tuple(key_cache[i].shape)} "
+                        f"value shape {tuple(value_cache[i].shape)}"
+                    )
+                
+                new_position_mapping = torch.arange(continuous_length, device=position_ids.device)
+            else:
+                # 非连续情况：需要使用索引
+                # 检查是否所有batch的位置相同
+                all_same = batch_size == 1 or torch.all(position_ids == position_ids[0])
+                
+                if all_same:
+                    # 所有batch位置相同，可以共享索引
+                    for i in range(len(key_cache)):
+                        k = key_cache[i].flatten(0, 1)
+                        v = value_cache[i].flatten(0, 1)
+                        
+                        # 使用index_select（比gather快）
+                        selected_key = k.index_select(2, complete_positions)
+                        selected_value = v.index_select(1, complete_positions)
+                        
+                        key_cache[i] = selected_key
+                        value_cache[i] = selected_value
+                        
+                        logger.info(
+                            f"[KV] L{i:02d} index_select - key shape {tuple(selected_key.shape)} "
+                            f"value shape {tuple(selected_value.shape)}"
+                        )
+                    
+                    new_position_mapping = torch.arange(len(complete_positions), device=position_ids.device)
+                else:
+                    # 不同batch有不同位置，需要更复杂的处理
+                    # 这里保留原有的复杂逻辑，但可以进一步优化
+                    for i in range(len(key_cache)):
+                        k = key_cache[i].flatten(0, 1)
+                        v = value_cache[i].flatten(0, 1)
+                        num_kv_heads = k.shape[0] // batch_size
+                        
+                        # 构建每个batch的完整位置
+                        all_positions_list = []
+                        max_length = 0
+                        
+                        for batch_idx in range(batch_size):
+                            batch_tree_pos = position_ids[batch_idx]
+                            batch_root = batch_tree_pos[0].item()
+                            batch_prefix = torch.arange(0, batch_root, device=position_ids.device)
+                            batch_complete = torch.cat([batch_prefix, batch_tree_pos])
+                            all_positions_list.append(batch_complete)
+                            max_length = max(max_length, len(batch_complete))
+                        
+                        # 为每个batch单独处理（避免padding）
+                        selected_keys = []
+                        selected_values = []
+                        
+                        for batch_idx, positions in enumerate(all_positions_list):
+                            for head_idx in range(num_kv_heads):
+                                idx = batch_idx * num_kv_heads + head_idx
+                                selected_keys.append(k[idx:idx+1, :, positions])
+                                selected_values.append(v[idx:idx+1, positions, :])
+                        
+                        # 合并结果
+                        if all(sk.shape[2] == selected_keys[0].shape[2] for sk in selected_keys):
+                            # 如果所有序列长度相同，可以直接cat
+                            key_cache[i] = torch.cat(selected_keys, dim=0)
+                            value_cache[i] = torch.cat(selected_values, dim=0)
+                        else:
+                            # 需要padding到相同长度
+                            padded_key = torch.zeros(k.shape[0], k.shape[1], max_length, dtype=k.dtype, device=k.device)
+                            padded_value = torch.zeros(v.shape[0], max_length, v.shape[2], dtype=v.dtype, device=v.device)
+                            
+                            for idx, (sk, sv) in enumerate(zip(selected_keys, selected_values)):
+                                seq_len = sk.shape[2]
+                                padded_key[idx, :, :seq_len] = sk[0]
+                                padded_value[idx, :seq_len, :] = sv[0]
+                            
+                            key_cache[i] = padded_key
+                            value_cache[i] = padded_value
+                        
+                        if i == 0:
+                            new_position_mapping = torch.arange(max_length, device=position_ids.device)
         
         layer_past = tuple(chain(*zip(key_cache, value_cache)))
         logger.info(f"cache_tensors size: {len(cache_tensors)}, selected layer_past size: {len(layer_past)}")
