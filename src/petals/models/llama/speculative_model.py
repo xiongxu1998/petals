@@ -85,7 +85,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         **model_kwargs,
     ) -> torch.LongTensor:
         logger.info("Starting speculative decoding with distributed inference session!")
-        tokenizer = AutoTokenizer.from_pretrained("huggyllama/llama-7b", use_fast=False)
+        # tokenizer = AutoTokenizer.from_pretrained("huggyllama/llama-7b", use_fast=False)
         
         has_eos_stopping_criteria = any(hasattr(criteria, "eos_token_id") for criteria in stopping_criteria)
         batch_size = input_ids.shape[0]
@@ -137,27 +137,27 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
             if verified_tokens is not None:
                 current_input_ids = torch.cat([current_input_ids, verified_tokens], dim=-1)
                 current_input_ids = torch.cat([current_input_ids, llm_generated_token.unsqueeze(0)], dim=-1)
-                logger.info(f"[DEBUG] Verified tokens appended: {verified_tokens.tolist()}, llm_generated_token: {llm_generated_token}")
-                logger.info(f"[DEBUG] New sequence length: {current_input_ids.shape[1]}")
-                new_added_text = ""
-                for i in range(len(verified_tokens)):
-                    new_added_text += tokenizer.decode(verified_tokens[i])
-                new_added_text += " " + tokenizer.decode(llm_generated_token)
-                logger.info(f"[DEBUG] new added: {new_added_text}")
-                result = ""
-                for i in range(len(current_input_ids)):
-                    result += tokenizer.decode(current_input_ids[i])
-                logger.info(f"[DEBUG] temp result: {result}")
+                # logger.info(f"[DEBUG] Verified tokens appended: {verified_tokens.tolist()}, llm_generated_token: {llm_generated_token}")
+                # logger.info(f"[DEBUG] New sequence length: {current_input_ids.shape[1]}")
+                # new_added_text = ""
+                # for i in range(len(verified_tokens)):
+                #     new_added_text += tokenizer.decode(verified_tokens[i])
+                # new_added_text += " " + tokenizer.decode(llm_generated_token)
+                # logger.info(f"[DEBUG] new added: {new_added_text}")
+                # result = ""
+                # for i in range(len(current_input_ids)):
+                #     result += tokenizer.decode(current_input_ids[i])
+                # logger.info(f"[DEBUG] temp result: {result}")
 
                 if streamer is not None:
                     streamer.put(verified_tokens.cpu())
             else :
                 current_input_ids = torch.cat([current_input_ids, llm_generated_token.unsqueeze(0)], dim=-1)
-                logger.info(f"[DEBUG] new added llm_generated_token: {llm_generated_token}, text: {tokenizer.decode(llm_generated_token)}")
-                result = ""
-                for i in range(len(current_input_ids)):
-                    result += tokenizer.decode(current_input_ids[i])
-                logger.info(f"[DEBUG] temp result: {result}")
+                # logger.info(f"[DEBUG] new added llm_generated_token: {llm_generated_token}, text: {tokenizer.decode(llm_generated_token)}")
+                # result = ""
+                # for i in range(len(current_input_ids)):
+                #     result += tokenizer.decode(current_input_ids[i])
+                # logger.info(f"[DEBUG] temp result: {result}")
 
             # 5. Check if finished
             unfinished_sequences = unfinished_sequences & ~stopping_criteria(current_input_ids, None)
@@ -344,7 +344,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         batch_size = input_ids.shape[0]
         trees = []
         logger.info(f"Building trees for batch_size: {batch_size}")
-        tokenizer = AutoTokenizer.from_pretrained("huggyllama/llama-7b", use_fast=False)
+        # tokenizer = AutoTokenizer.from_pretrained("huggyllama/llama-7b", use_fast=False)
         for batch_idx in range(batch_size):
             root_token = input_ids[batch_idx, -1].item()
             tree = SpeculativeTree(root_token, f"req_{batch_idx}")
@@ -413,14 +413,14 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                     
                     candidates_per_node.append(candidates)
                 
-                logger.info(f"[DEBUG] (batch {batch_idx}) depth {depth} SSM candidates: {candidates_per_node}")
-                candidates_text = ""
-                for i in range(len(candidates_per_node)):
-                    candidates_p = candidates_per_node[i]
-                    for j in range(len(candidates_p)):
-                        token_id, prob = candidates_p[j]
-                        candidates_text += tokenizer.decode(token_id) + ", "      
-                logger.info(f"[DEBUG] depth: {depth} SSM candidates: {candidates_per_node}, candidates_text: {candidates_text}")
+                # logger.info(f"[DEBUG] (batch {batch_idx}) depth {depth} SSM candidates: {candidates_per_node}")
+                # candidates_text = ""
+                # for i in range(len(candidates_per_node)):
+                #     candidates_p = candidates_per_node[i]
+                #     for j in range(len(candidates_p)):
+                #         token_id, prob = candidates_p[j]
+                #         candidates_text += tokenizer.decode(token_id) + ", "      
+                # logger.info(f"[DEBUG] depth: {depth} SSM candidates: {candidates_per_node}, candidates_text: {candidates_text}")
                 
                 try:
                     new_nodes = tree.add_layer(current_nodes, candidates_per_node)
