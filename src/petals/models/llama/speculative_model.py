@@ -35,7 +35,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         streamer: Optional["BaseStreamer"] = None,
         beam_width: int = 2,
-        max_tree_depth: int = 3,
+        max_tree_depth: int = 4,
         use_kv_cache: bool = True,
         kv_cache_window: int = 2048,
         max_new_tokens: int = 128,

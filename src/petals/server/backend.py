@@ -337,55 +337,44 @@ class TransformerBackend(ModuleBackend):
         # 情况B: 后续的增量生成 (通常 current_token_count 很小)
         else:
             # case_b_start = time.time()
-            
+
             # 直接构建小的current_mask
             # tensor_create_start = time.time()
             current_mask = torch.zeros(B, current_token_count, src_len, dtype=torch.bool, device=device)
             # tensor_create_time = time.time() - tensor_create_start
-            
+
             # 判断当前token的位置
+            # position_start = time.time()
             start_pos = past_key_values_length
-            
+            # position_time = time.time() - position_start
+
             # 如果还在前缀部分（较少见）
             if start_pos < prefix_len:
                 # prefix_case_start = time.time()
-                
-                # 预计算常用值
+
                 prefix_tokens = min(current_token_count, prefix_len - start_pos)
-                tree_tokens = current_token_count - prefix_tokens if current_token_count > prefix_tokens else 0
-                
-                # 向量化因果mask构建
-                # causal_start = time.time()
-                if prefix_tokens > 0:
-                    # 使用torch.tril创建因果mask，比循环快得多
-                    causal_size = start_pos + prefix_tokens
-                    causal_mask = torch.tril(torch.ones(prefix_tokens, causal_size, 
-                                                       dtype=torch.bool, device=device), 
-                                           diagonal=start_pos-1)
-                    current_mask[:, :prefix_tokens, :causal_size] = causal_mask
-                # causal_time = time.time() - causal_start
-                
-                # 树部分处理
-                # tree_part_start = time.time()
-                if tree_tokens > 0:
+                # 因果mask
+                for i in range(prefix_tokens):
+                    current_mask[:, i, :start_pos + i + 1] = True
+
+                # 如果有token进入树部分
+                if current_token_count > prefix_tokens:
+                    tree_tokens = current_token_count - prefix_tokens
                     # 树token可以看到所有前缀
-                    if prefix_len > 0:
-                        current_mask[:, prefix_tokens:, :prefix_len] = True
+                    current_mask[:, prefix_tokens:, :prefix_len] = True
                     # 树内部可见性
-                    if tree_len > 0:
-                        current_mask[:, prefix_tokens:, prefix_len:prefix_len+tree_len] = tree_mask[:, :tree_tokens, :]
-                # tree_part_time = time.time() - tree_part_start
-                
+                    current_mask[:, prefix_tokens:, prefix_len:] = tree_mask[:, :tree_tokens, :]
+
                 # prefix_case_time = time.time() - prefix_case_start
                 # case_b_time = time.time() - case_b_start
                 # total_time = time.time() - start_time
-                
-                # print(f"[Case B-Prefix] Total: {total_time*1000:.3f}ms, "
-                #       f"Unpack: {unpack_time*1000:.3f}ms, "
-                #       f"Calc: {calc_time*1000:.3f}ms, "
-                #       f"TensorCreate: {tensor_create_time*1000:.3f}ms, "
-                #       f"Causal: {causal_time*1000:.3f}ms, "
-                #       f"TreePart: {tree_part_time*1000:.3f}ms")
+
+                # print(f"[Case B-Prefix] Total: {total_time1000:.3f}ms, "
+                #       f"Unpack: {unpack_time1000:.3f}ms, "
+                #       f"Calc: {calc_time1000:.3f}ms, "
+                #       f"TensorCreate: {tensor_create_time1000:.3f}ms, "
+                #       f"Position: {position_time1000:.3f}ms, "
+                #       f"PrefixLogic: {prefix_case_time1000:.3f}ms")
             
             # 如果都在树部分（最常见）
             else:
