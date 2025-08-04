@@ -45,42 +45,43 @@ def main():
 
 @torch.inference_mode()
 def benchmark_inference(process_idx, args, result_pipe):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
+    test_prompt = "Hello world from Xu, I am a master student from"
+    input_ids = tokenizer.encode(test_prompt, return_tensors="pt", add_special_tokens=False).to(device)
     # Using use_fast=False since LlamaTokenizerFast takes a long time to start, and we decode 1 token at a time anyway
     
     ssm = AutoModelForCausalLM.from_pretrained("JackFram/llama-68m")
+    
+    
+    ssm = ssm.to(device).eval()
+    # ssm = ssm.to(input_ids.device).eval().half()
+    # ssm = torch.compile(ssm)
+    
+    logger.info(f"input_ids.device: {input_ids.device}")
+    logger.info(f"ssm device: {next(ssm.parameters()).device}")
+    logger.info(f"ssm dtype: {next(ssm.parameters()).dtype}")
 
     model = AutoDistributedSpeculativeModel.from_pretrained(
         args.model, initial_peers=args.initial_peers, torch_dtype=DTYPE_MAP[args.torch_dtype]
-    )
+    ).to(device)
     logger.info(f"Created model: {process_idx=} {model.device=}")
 
     result = ""
     step_times = []
-    # with model.transformer.h.inference_session(max_length=args.seq_len) as sess:
-    #     for step in range(args.seq_len):
-    #         start_time = perf_counter()
-
-    #         outputs = model.generate(max_new_tokens=1, session=sess)
-    #         result += tokenizer.decode(outputs[0])
-
-    #         logger.info(f"benchmark_inference, result: {result}")
-    #         if step >= args.warmup_steps:
-    #             step_times.append(perf_counter() - start_time)
-    #             speed = 1 / np.mean(step_times)
-    #             logger.info(f"{process_idx=} {step=} {speed=:.2f}")
     
-    test_prompt = "Hello world from Xu, I am a master student from"
-    input_ids = tokenizer.encode(test_prompt, return_tensors="pt", add_special_tokens=False)
     with torch.no_grad():
-        dummy_input = torch.ones(1, 8, dtype=torch.long, device=input_ids.device)
+        dummy_input = torch.ones(1, 8, dtype=torch.long, device=device)
         ssm(dummy_input, attention_mask=torch.ones_like(dummy_input))
+    
     start_time = perf_counter()
     result = model.generate(input_ids=input_ids, ssm=ssm)
     time = perf_counter() - start_time
     generated_tokens_num = result.shape[1] - input_ids.shape[1]
     speed = generated_tokens_num / time
     decoded_result = tokenizer.decode(result[0], skip_special_tokens=True)
+    
     logger.info(f"benchmark_inference, result: {result}, generated_tokens_num: {generated_tokens_num}, time: {time} speed: {speed}, decoded_result: {decoded_result}")
     result_pipe.send(speed)
 

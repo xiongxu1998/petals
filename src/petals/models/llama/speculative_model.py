@@ -456,7 +456,8 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
 
                 logger.info(f"[Tree] Batch {batch_idx}, depth {depth}: "
                             f"SSM infer: {end_ssm - start_ssm:.4f}s, "
-                            f"add_layer: {end_add_layer - start_add_layer:.4f}s")
+                            f"add_layer: {end_add_layer - start_add_layer:.4f}s"
+                            f"prepare context: {start_ssm-start_depth:.4f}")
 
             trees.append(tree)
             end_batch = time.time()
