@@ -126,25 +126,25 @@ class TransformerBackend(ModuleBackend):
             *inference_info.cache_handles
         ) as cache_tensors, self._peft_module.using_adapter(inference_info.active_adapter):
             # 时间记录
-            t0 = time.time()
+            # t0 = time.time()
             
             self._reorder_cache_inplace(cache_tensors, hypo_ids)
-            t1 = time.time()
+            # t1 = time.time()
             
             # 估算最大块长度
             max_chunk_length = self._estimate_max_chunk_length(hidden_states, inference_info)
             output_hidden_states = torch.empty_like(hidden_states) if seq_len > max_chunk_length else None
-            t2 = time.time()
+            # t2 = time.time()
             
             # logger.info(f"inference_step, prefix_len: {inference_info.prefix_length}, kv_cache_position_ids: {inference_info.kv_cache_position_ids}")
             
             # 1. 选择需要的 cache（返回两个值）
-            layer_past, new_position_mapping = self._select_layer_past(
+            layer_past, need_reorder = self._select_layer_past(
                 cache_tensors, 
                 inference_info.prefix_length, 
                 inference_info.kv_cache_position_ids
             )
-            t3 = time.time()
+            # t3 = time.time()
             
             # 2. 获取 past_key_values 的长度
             past_key_values_length = 0
@@ -153,11 +153,11 @@ class TransformerBackend(ModuleBackend):
             
             # 3. 如果使用了 kv_cache_position_ids，需要更新 cache_tensors
             # 使选中的 cache 在原始位置上变成连续存储
-            if inference_info.kv_cache_position_ids is not None and not is_dummy(inference_info.kv_cache_position_ids):
+            if need_reorder:
                 # 这里需要将 layer_past 的内容写回 cache_tensors 的前面部分
                 # 使其在物理上连续存储
                 self._compact_cache_inplace(cache_tensors, layer_past, past_key_values_length)
-            t4 = time.time()
+            # t4 = time.time()
             
             # 4. 创建 attention mask
             full_mask = self._create_attention_mask(
@@ -167,7 +167,7 @@ class TransformerBackend(ModuleBackend):
                 device=hidden_states.device,
             )
             attention_mask = self.convert_mask_to_scores(full_mask) if full_mask is not None else None
-            t5 = time.time()
+            # t5 = time.time()
             
             # logger.info(f"inference_step, layer_past: {layer_past}")
             
@@ -176,14 +176,14 @@ class TransformerBackend(ModuleBackend):
             for offset in range(0, seq_len, max_chunk_length):
                 hidden_states_chunk = hidden_states[:, offset : offset + max_chunk_length, :]
                 
-                t_forward_start = time.time()
+                # t_forward_start = time.time()
                 output_hidden_states_chunk, new_kvs = self.module.forward(
                     hidden_states_chunk, 
                     layer_past=layer_past, 
                     attention_mask=attention_mask, 
                     use_cache=True
                 )
-                forward_time += time.time() - t_forward_start
+                # forward_time += time.time() - t_forward_start
                 
                 if seq_len > max_chunk_length:
                     output_hidden_states[:, offset : offset + max_chunk_length] = output_hidden_states_chunk
@@ -191,23 +191,23 @@ class TransformerBackend(ModuleBackend):
                     output_hidden_states = output_hidden_states_chunk
                 
                 layer_past = new_kvs
-            t6 = time.time()
+            # t6 = time.time()
 
             # 6. 最后更新 cache（将新生成的 KV 写入）
             self._update_cache_inplace(cache_tensors, new_kvs, past_key_values_length)
-            t7 = time.time()
+            # t7 = time.time()
             
             # 打印时间统计
-            logger.info(
-                f"[Timing] inference_step total: {t7-t0:.4f}s | "
-                f"reorder_cache: {t1-t0:.4f}s | "
-                f"estimate_chunk: {t2-t1:.4f}s | "
-                f"select_layer_past: {t3-t2:.4f}s | "
-                f"compact_cache: {t4-t3:.4f}s | "
-                f"create_mask: {t5-t4:.4f}s | "
-                f"forward: {forward_time:.4f}s | "
-                f"update_cache: {t7-t6:.4f}s"
-            )
+            # logger.info(
+            #     f"[Timing] inference_step total: {t7-t0:.4f}s | "
+            #     f"reorder_cache: {t1-t0:.4f}s | "
+            #     f"estimate_chunk: {t2-t1:.4f}s | "
+            #     f"select_layer_past: {t3-t2:.4f}s | "
+            #     f"compact_cache: {t4-t3:.4f}s | "
+            #     f"create_mask: {t5-t4:.4f}s | "
+            #     f"forward: {forward_time:.4f}s | "
+            #     f"update_cache: {t7-t6:.4f}s"
+            # )
             
             return (output_hidden_states,)
 
@@ -255,7 +255,8 @@ class TransformerBackend(ModuleBackend):
         # logger.info(f"Cached new tree mask for key {cache_key}, cache size: {len(self._tree_mask_cache)}")
         
         return tree_mask
-                
+
+
     def _create_attention_mask(
         self,
         tree_attention_mask: Optional[torch.Tensor],
@@ -264,10 +265,13 @@ class TransformerBackend(ModuleBackend):
         past_key_values_length: int,
         device: torch.device,
     ) -> Optional[torch.Tensor]:
+        # start_time = time.time()
+        
         if tree_attention_mask is None or is_dummy(tree_attention_mask):
             return None
 
         # ---- 1. 解包树段（使用缓存）----
+        # unpack_start = time.time()
         if tree_attention_mask.dtype != torch.uint8:
             raise TypeError("tree_attention_mask should be uint8 packed")
 
@@ -275,68 +279,141 @@ class TransformerBackend(ModuleBackend):
         tree_mask = self._get_tree_mask_from_cache(tree_attention_mask, device)
         tree_len = tree_mask.size(1)
         B = tree_mask.size(0)
+        # unpack_time = time.time() - unpack_start
 
         # ---- 2. 计算关键参数 ----
+        # calc_start = time.time()
         prefix_len = src_len - tree_len
         current_token_count = src_len - past_key_values_length
         
         if current_token_count <= 0:
             return None
+        # calc_time = time.time() - calc_start
         
         # ---- 3. 优化：分两种常见情况处理 ----
         
         # 情况A: 第一次forward (past_key_values_length = 0)
         if past_key_values_length == 0:
+            # case_a_start = time.time()
+            
             # 需要构建完整mask，但只返回需要的部分
             # 这种情况下 current_token_count = src_len
+            # tensor_create_start = time.time()
             full_mask = torch.zeros(B, src_len, src_len, dtype=torch.bool, device=device)
+            # tensor_create_time = time.time() - tensor_create_start
             
             # 前缀部分：因果mask（向量化）
+            # prefix_start = time.time()
             if prefix_len > 0:
                 causal_indices = torch.tril_indices(prefix_len, prefix_len, device=device)
                 full_mask[:, causal_indices[0], causal_indices[1]] = True
+            # prefix_time = time.time() - prefix_start
             
             # 树对前缀的可见性
+            # tree_prefix_start = time.time()
             if prefix_len > 0 and tree_len > 0:
                 full_mask[:, prefix_len:, :prefix_len] = True
+            # tree_prefix_time = time.time() - tree_prefix_start
             
             # 树内部可见性
+            # tree_internal_start = time.time()
             if tree_len > 0:
                 full_mask[:, prefix_len:, prefix_len:] = tree_mask
+            # tree_internal_time = time.time() - tree_internal_start
+            
+            # case_a_time = time.time() - case_a_start
+            # total_time = time.time() - start_time
+            
+            # print(f"[Case A] Total: {total_time*1000:.3f}ms, "
+            #       f"Unpack: {unpack_time*1000:.3f}ms, "
+            #       f"Calc: {calc_time*1000:.3f}ms, "
+            #       f"TensorCreate: {tensor_create_time*1000:.3f}ms, "
+            #       f"Prefix: {prefix_time*1000:.3f}ms, "
+            #       f"TreePrefix: {tree_prefix_time*1000:.3f}ms, "
+            #       f"TreeInternal: {tree_internal_time*1000:.3f}ms")
             
             return full_mask
         
         # 情况B: 后续的增量生成 (通常 current_token_count 很小)
         else:
+            # case_b_start = time.time()
+            
             # 直接构建小的current_mask
+            # tensor_create_start = time.time()
             current_mask = torch.zeros(B, current_token_count, src_len, dtype=torch.bool, device=device)
+            # tensor_create_time = time.time() - tensor_create_start
             
             # 判断当前token的位置
             start_pos = past_key_values_length
             
             # 如果还在前缀部分（较少见）
             if start_pos < prefix_len:
-                prefix_tokens = min(current_token_count, prefix_len - start_pos)
-                # 因果mask
-                for i in range(prefix_tokens):
-                    current_mask[:, i, :start_pos + i + 1] = True
+                # prefix_case_start = time.time()
                 
-                # 如果有token进入树部分
-                if current_token_count > prefix_tokens:
-                    tree_tokens = current_token_count - prefix_tokens
+                # 预计算常用值
+                prefix_tokens = min(current_token_count, prefix_len - start_pos)
+                tree_tokens = current_token_count - prefix_tokens if current_token_count > prefix_tokens else 0
+                
+                # 向量化因果mask构建
+                # causal_start = time.time()
+                if prefix_tokens > 0:
+                    # 使用torch.tril创建因果mask，比循环快得多
+                    causal_size = start_pos + prefix_tokens
+                    causal_mask = torch.tril(torch.ones(prefix_tokens, causal_size, 
+                                                       dtype=torch.bool, device=device), 
+                                           diagonal=start_pos-1)
+                    current_mask[:, :prefix_tokens, :causal_size] = causal_mask
+                # causal_time = time.time() - causal_start
+                
+                # 树部分处理
+                # tree_part_start = time.time()
+                if tree_tokens > 0:
                     # 树token可以看到所有前缀
-                    current_mask[:, prefix_tokens:, :prefix_len] = True
+                    if prefix_len > 0:
+                        current_mask[:, prefix_tokens:, :prefix_len] = True
                     # 树内部可见性
-                    current_mask[:, prefix_tokens:, prefix_len:] = tree_mask[:, :tree_tokens, :]
+                    if tree_len > 0:
+                        current_mask[:, prefix_tokens:, prefix_len:prefix_len+tree_len] = tree_mask[:, :tree_tokens, :]
+                # tree_part_time = time.time() - tree_part_start
+                
+                # prefix_case_time = time.time() - prefix_case_start
+                # case_b_time = time.time() - case_b_start
+                # total_time = time.time() - start_time
+                
+                # print(f"[Case B-Prefix] Total: {total_time*1000:.3f}ms, "
+                #       f"Unpack: {unpack_time*1000:.3f}ms, "
+                #       f"Calc: {calc_time*1000:.3f}ms, "
+                #       f"TensorCreate: {tensor_create_time*1000:.3f}ms, "
+                #       f"Causal: {causal_time*1000:.3f}ms, "
+                #       f"TreePart: {tree_part_time*1000:.3f}ms")
             
             # 如果都在树部分（最常见）
             else:
+                # tree_case_start = time.time()
+                
                 tree_start = start_pos - prefix_len
                 # 所有当前token都可以看到前缀
+                # prefix_visible_start = time.time()
                 if prefix_len > 0:
                     current_mask[:, :, :prefix_len] = True
+                # prefix_visible_time = time.time() - prefix_visible_start
+                
                 # 树内部可见性
+                # tree_visible_start = time.time()
                 current_mask[:, :, prefix_len:] = tree_mask[:, tree_start:tree_start + current_token_count, :]
+                # tree_visible_time = time.time() - tree_visible_start
+                
+                # tree_case_time = time.time() - tree_case_start
+                # case_b_time = time.time() - case_b_start
+                # total_time = time.time() - start_time
+                
+                # print(f"[Case B-Tree] Total: {total_time*1000:.3f}ms, "
+                #       f"Unpack: {unpack_time*1000:.3f}ms, "
+                #       f"Calc: {calc_time*1000:.3f}ms, "
+                #       f"TensorCreate: {tensor_create_time*1000:.3f}ms, "
+                #       f"Position: {position_time*1000:.3f}ms, "
+                #       f"PrefixVisible: {prefix_visible_time*1000:.3f}ms, "
+                #       f"TreeVisible: {tree_visible_time*1000:.3f}ms")
             
             return current_mask
     
@@ -412,11 +489,11 @@ class TransformerBackend(ModuleBackend):
                 selected_reshaped = selected.view(batch_size, num_heads, selected_length, head_dim)
                 cache_tensor[:, :, :selected_length, :] = selected_reshaped
 
-    def _select_layer_past(self, cache_tensors: Sequence[torch.Tensor], prefix_length: int, kv_cache_position_ids: Optional[torch.Tensor] = None) -> Tuple[Sequence[torch.Tensor], Optional[torch.Tensor]]:
+    def _select_layer_past(self, cache_tensors: Sequence[torch.Tensor], prefix_length: int, kv_cache_position_ids: Optional[torch.Tensor] = None) -> Tuple[Sequence[torch.Tensor], bool]:
         """Extract first {prefix_length} tokens and optionally specific positions based on kv_cache_position_ids"""
-        start_time = time.time()
+        # start_time = time.time()
         key_cache, value_cache = list(cache_tensors[0::2]), list(cache_tensors[1::2])
-        new_position_mapping = None  # 用于记录新的位置映射
+        need_reorder = False
         
         # 快速路径：如果没有position_ids，直接切片
         if kv_cache_position_ids is None or is_dummy(kv_cache_position_ids):
@@ -426,115 +503,89 @@ class TransformerBackend(ModuleBackend):
                 
                 key_cache[i] = k[:, :, :prefix_length]
                 value_cache[i] = v[:, :prefix_length, :]
-                
-                # logger.info(
-                #     f"[KV] L{i:02d} prefix key shape {tuple(key_cache[i].shape)} "
-                #     f"value shape {tuple(value_cache[i].shape)} "
-                #     f"prefix_length={prefix_length}"
-                # )
         else:
             # 预处理 position_ids
-            position_ids = kv_cache_position_ids.to(cache_tensors[0].device)
-            if position_ids.dim() == 1:
-                position_ids = position_ids.unsqueeze(0)
+            position_ids = kv_cache_position_ids
+            # if position_ids.dim() == 1:
+            #     position_ids = position_ids.unsqueeze(0)
             
-            batch_size = position_ids.shape[0]
+            batch_size = 1
             
-            # 分析位置模式
-            # 假设第一个位置是根节点，需要包含它之前的所有前缀
-            root_position = position_ids[0, 0].item()
+            # 提取第一个batch的tree positions
+            first_batch = position_ids
+            if first_batch.numel() == 1:
+                # 如果只有一个元素，直接取值
+                tree_positions = [first_batch.item()]
+            else:
+                # 如果有多个元素，转换为列表
+                tree_positions = first_batch.cpu().tolist()
             
-            # 构建完整位置（前缀 + 树节点）
-            prefix_positions = torch.arange(0, root_position, device=position_ids.device)
-            tree_positions = position_ids[0]  # 假设所有batch相同
-            complete_positions = torch.cat([prefix_positions, tree_positions])
+            root_position = tree_positions[0]  # 第一个位置是root
             
-            pre_handle_time = time.time()
+            # 构建完整位置：前缀[0, 1, ..., root-1] + tree positions
+            prefix_positions = list(range(root_position))  # [0, 1, 2, ..., root-1]
+            complete_positions = prefix_positions + tree_positions  # 完整序列
             
-            # logger.info(f"pre_handle_time: {pre_handle_time - start_time}")
+            # 检查完整序列是否连续（从0开始）
+            expected_continuous = list(range(len(complete_positions)))
+            is_continuous = complete_positions == expected_continuous
             
-            # 检查是否是连续序列
-            is_continuous = False
-            continuous_length = 0
-            
-            if len(complete_positions) > 0:
-                # 检查是否是从0开始的连续序列
-                expected_continuous = torch.arange(len(complete_positions), device=position_ids.device)
-                is_continuous = torch.equal(complete_positions, expected_continuous)
-                continuous_length = len(complete_positions)
-                check_continuous_time = time.time()
-                # logger.info(f"Position analysis: is_continuous={is_continuous}, length={continuous_length}, check_continuous_time: {check_continuous_time - pre_handle_time}")
-            
-            # 根据位置模式选择优化策略
             if is_continuous:
-                # 最优情况：位置是连续的，直接切片
+                # 连续情况：直接切片，类似prefix_length的处理方式
+                seq_length = len(complete_positions)
                 for i in range(len(key_cache)):
                     k = key_cache[i].flatten(0, 1)
                     v = value_cache[i].flatten(0, 1)
                     
-                    key_cache[i] = k[:, :, :continuous_length]
-                    value_cache[i] = v[:, :continuous_length, :]
-                    
-                    # logger.info(
-                    #     f"[KV] L{i:02d} continuous slice - key shape {tuple(key_cache[i].shape)} "
-                    #     f"value shape {tuple(value_cache[i].shape)}"
-                    # )
-                # final_handle_time = time.time()
-                # logger.info(f"final_handle_time: {final_handle_time - check_continuous_time}")
-                # new_position_mapping = torch.arange(continuous_length, device=position_ids.device)
+                    key_cache[i] = k[:, :, :seq_length]
+                    value_cache[i] = v[:, :seq_length, :]
             else:
-                # 非连续情况：需要使用索引
+                # 非连续情况：使用index_select
+                need_reorder = True
+                
                 # 检查是否所有batch的位置相同
-                all_same = batch_size == 1 or torch.all(position_ids == position_ids[0])
+                all_same = batch_size == 1
                 
                 if all_same:
                     # 所有batch位置相同，可以共享索引
+                    positions_tensor = torch.tensor(complete_positions, device=cache_tensors[0].device)
+                    
                     for i in range(len(key_cache)):
                         k = key_cache[i].flatten(0, 1)
                         v = value_cache[i].flatten(0, 1)
                         
-                        # 使用index_select（比gather快）
-                        selected_key = k.index_select(2, complete_positions)
-                        selected_value = v.index_select(1, complete_positions)
-                        
-                        key_cache[i] = selected_key
-                        value_cache[i] = selected_value
-                        
-                        # logger.info(
-                        #     f"[KV] L{i:02d} index_select - key shape {tuple(selected_key.shape)} "
-                        #     f"value shape {tuple(selected_value.shape)}"
-                        # )
-                    
-                    # new_position_mapping = torch.arange(len(complete_positions), device=position_ids.device)
+                        # 使用index_select
+                        key_cache[i] = k.index_select(2, positions_tensor)
+                        value_cache[i] = v.index_select(1, positions_tensor)
                 else:
                     # 不同batch有不同位置，需要更复杂的处理
-                    # 这里保留原有的复杂逻辑，但可以进一步优化
                     for i in range(len(key_cache)):
                         k = key_cache[i].flatten(0, 1)
                         v = value_cache[i].flatten(0, 1)
                         num_kv_heads = k.shape[0] // batch_size
                         
-                        # 构建每个batch的完整位置
-                        all_positions_list = []
+                        # 为每个batch单独处理
+                        selected_keys = []
+                        selected_values = []
                         max_length = 0
                         
                         for batch_idx in range(batch_size):
-                            batch_tree_pos = position_ids[batch_idx]
-                            batch_root = batch_tree_pos[0].item()
-                            batch_prefix = torch.arange(0, batch_root, device=position_ids.device)
-                            batch_complete = torch.cat([batch_prefix, batch_tree_pos])
-                            all_positions_list.append(batch_complete)
+                            batch_tensor = position_ids[batch_idx]
+                            if batch_tensor.numel() == 1:
+                                batch_tree_positions = [batch_tensor.item()]
+                            else:
+                                batch_tree_positions = batch_tensor.cpu().tolist()
+                            
+                            batch_root = batch_tree_positions[0]
+                            batch_prefix = list(range(batch_root))
+                            batch_complete = batch_prefix + batch_tree_positions
+                            batch_positions_tensor = torch.tensor(batch_complete, device=position_ids.device)
                             max_length = max(max_length, len(batch_complete))
-                        
-                        # 为每个batch单独处理（避免padding）
-                        selected_keys = []
-                        selected_values = []
-                        
-                        for batch_idx, positions in enumerate(all_positions_list):
+                            
                             for head_idx in range(num_kv_heads):
                                 idx = batch_idx * num_kv_heads + head_idx
-                                selected_keys.append(k[idx:idx+1, :, positions])
-                                selected_values.append(v[idx:idx+1, positions, :])
+                                selected_keys.append(k[idx:idx+1].index_select(2, batch_positions_tensor))
+                                selected_values.append(v[idx:idx+1].index_select(1, batch_positions_tensor))
                         
                         # 合并结果
                         if all(sk.shape[2] == selected_keys[0].shape[2] for sk in selected_keys):
@@ -553,20 +604,13 @@ class TransformerBackend(ModuleBackend):
                             
                             key_cache[i] = padded_key
                             value_cache[i] = padded_value
-                        
-                        # if i == 0:
-                        #     new_position_mapping = torch.arange(max_length, device=position_ids.device)
         
-        # before_pack_time = time.time()
         layer_past = tuple(chain(*zip(key_cache, value_cache)))
-        # logger.info(f"cache_tensors size: {len(cache_tensors)}, selected layer_past size: {len(layer_past)}")
         
         # 返回 cache 和新的长度信息
         result = PerDeviceTensors(*layer_past) if len(self.module.module_shards) > 1 else layer_past
         
-        # pack_result_time = time.time()
-        # logger.info(f"pack_result_time: {pack_result_time - start_time}")
-        return result, new_position_mapping
+        return result, need_reorder
 
     def _update_cache_inplace(
         self, cache_tensors: Sequence[torch.Tensor], new_kvs: Sequence[torch.Tensor], prefix_length: int

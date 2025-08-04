@@ -88,7 +88,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
     ) -> torch.LongTensor:
         logger.info("Starting speculative decoding with distributed inference session!")
         # tokenizer = AutoTokenizer.from_pretrained("huggyllama/llama-7b", use_fast=False)
-        start_time_total = time.time()
+        # start_time_total = time.time()
         has_eos_stopping_criteria = any(hasattr(criteria, "eos_token_id") for criteria in stopping_criteria)
         batch_size = input_ids.shape[0]
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
@@ -104,23 +104,23 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         result = ""
         llm_generated_token = None
         
-        total_steps = 0
-        total_tree_build_time = 0
-        total_verify_time = 0
-        total_verify_tokens_num = 0
-        total_concat_time = 0
+        # total_steps = 0
+        # total_tree_build_time = 0
+        # total_verify_time = 0
+        # total_verify_tokens_num = 0
+        # total_concat_time = 0
         
         while not finished and current_input_ids.shape[1] < input_ids.shape[1] + max_new_tokens:
             # logger.info(f"\n==================== STEP {step_idx} ====================")
             # logger.info(f"[DEBUG] Current sequence length: {current_input_ids.shape[1]}")
             # logger.info(f"[DEBUG] Session position: {session.position}")
-            step_start = time.time()
-            t1 = time.time()
+            # step_start = time.time()
+            # t1 = time.time()
             # 1. Build speculative trees using SSM
             spec_trees = self._build_speculative_trees_batched(
                 current_input_ids, ssm, beam_width, max_tree_depth
             )
-            t2 = time.time()
+            # t2 = time.time()
             
             # 2. Verify trees using distributed inference - but through forward() call
             verified_tokens, verified_tokens_positions, past_key_values, llm_generated_token = self._verify_trees_with_forward(
@@ -133,7 +133,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                 use_kv_cache=use_kv_cache,
                 kv_cache_window=kv_cache_window
             )
-            t3 = time.time()
+            # t3 = time.time()
             
             past_key_values.set_kv_cache(verified_tokens_positions)
             
@@ -147,7 +147,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
 
             # 4. Update input sequence
             if verified_tokens is not None:
-                total_verify_tokens_num += verified_tokens.shape[1]
+                # total_verify_tokens_num += verified_tokens.shape[1]
                 current_input_ids = torch.cat([current_input_ids, verified_tokens], dim=-1)
                 current_input_ids = torch.cat([current_input_ids, llm_generated_token.unsqueeze(0)], dim=-1)
                 # logger.info(f"[DEBUG] Verified tokens appended: {verified_tokens.tolist()}, llm_generated_token: {llm_generated_token}")
@@ -172,7 +172,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                 #     result += tokenizer.decode(current_input_ids[i])
                 # logger.info(f"[DEBUG] temp result: {result}")
             
-            t4 = time.time()
+            # t4 = time.time()
 
             # 5. Check if finished
             unfinished_sequences = unfinished_sequences & ~stopping_criteria(current_input_ids, None)
@@ -180,21 +180,21 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
             step_idx += 1
             # logger.info(f"finished: {finished}, current_input_ids.shape[1]: {current_input_ids.shape[1]}, input_ids.shape[1]: {input_ids.shape[1]}, max_new_tokens: {max_new_tokens}")
             
-            total_steps += 1
-            total_tree_build_time += t2 - t1
-            total_verify_time += t3 - t2
-            total_concat_time += t4 - t3
+            # total_steps += 1
+            # total_tree_build_time += t2 - t1
+            # total_verify_time += t3 - t2
+            # total_concat_time += t4 - t3
 
         if streamer is not None:
             streamer.end()
         
-        end_time_total = time.time()
-        logger.info(f"[Timing] _sample_with_session total: {end_time_total - start_time_total:.4f}s | "
-                f"steps: {total_steps} | "
-                f"tree_build: {total_tree_build_time:.4f}s | "
-                f"verify: {total_verify_time:.4f}s | "
-                f"concat_and_stream: {total_concat_time:.4f}s | "
-                f"total_verify_tokens_num: {total_verify_tokens_num}")
+        # end_time_total = time.time()
+        # logger.info(f"[Timing] _sample_with_session total: {end_time_total - start_time_total:.4f}s | "
+        #         f"steps: {total_steps} | "
+        #         f"tree_build: {total_tree_build_time:.4f}s | "
+        #         f"verify: {total_verify_time:.4f}s | "
+        #         f"concat_and_stream: {total_concat_time:.4f}s | "
+        #         f"total_verify_tokens_num: {total_verify_tokens_num}")
         return current_input_ids
     
     def _verify_trees_with_forward(
@@ -368,18 +368,18 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         max_depth: int
     ) -> List[SpeculativeTree]:
         """Build speculative trees using the small model (SSM)"""
-        start_total = time.time()
+        # start_total = time.time()
         batch_size = input_ids.shape[0]
         trees = []
 
         for batch_idx in range(batch_size):
-            start_batch = time.time()
+            # start_batch = time.time()
             root_token = input_ids[batch_idx, -1].item()
             tree = SpeculativeTree(root_token, f"req_{batch_idx}")
-            logger.info(f"[Tree] Building tree for batch {batch_idx}, root_token: {root_token}")
+            # logger.info(f"[Tree] Building tree for batch {batch_idx}, root_token: {root_token}")
 
             for depth in range(max_depth):
-                start_depth = time.time()
+                # start_depth = time.time()
 
                 current_nodes = tree.get_nodes_at_depth(depth)
                 if not current_nodes:
@@ -423,14 +423,14 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                 batch_masks = torch.stack(attention_masks)
 
                 # SSM forward
-                start_ssm = time.time()
+                # start_ssm = time.time()
                 with torch.no_grad():
                     outputs = ssm(batch_contexts, attention_mask=batch_masks)
                     batch_logits = outputs.logits[:, -1, :]
-                end_ssm = time.time()
+                # end_ssm = time.time()
 
                 # Generate candidates
-                start_add_layer = time.time()
+                # start_add_layer = time.time()
                 candidates_per_node = []
                 for i in range(len(current_nodes)):
                     logits = batch_logits[i]
@@ -452,19 +452,19 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                 except ValueError as e:
                     logger.warning(f"Failed to add tree layer: {e}")
                     break
-                end_add_layer = time.time()
+                # end_add_layer = time.time()
 
-                logger.info(f"[Tree] Batch {batch_idx}, depth {depth}: "
-                            f"SSM infer: {end_ssm - start_ssm:.4f}s, "
-                            f"add_layer: {end_add_layer - start_add_layer:.4f}s"
-                            f"prepare context: {start_ssm-start_depth:.4f}")
+                # logger.info(f"[Tree] Batch {batch_idx}, depth {depth}: "
+                #             f"SSM infer: {end_ssm - start_ssm:.4f}s, "
+                #             f"add_layer: {end_add_layer - start_add_layer:.4f}s"
+                #             f"prepare context: {start_ssm-start_depth:.4f}")
 
             trees.append(tree)
-            end_batch = time.time()
-            logger.info(f"[Tree] Finished batch {batch_idx} in {end_batch - start_batch:.4f}s")
+            # end_batch = time.time()
+            # logger.info(f"[Tree] Finished batch {batch_idx} in {end_batch - start_batch:.4f}s")
 
-        total_time = time.time() - start_total
-        logger.info(f"[Tree] Built {batch_size} speculative trees in {total_time:.4f}s")
+        # total_time = time.time() - start_total
+        # logger.info(f"[Tree] Built {batch_size} speculative trees in {total_time:.4f}s")
         return trees
     
     def _extract_best_verified_paths_fixed(

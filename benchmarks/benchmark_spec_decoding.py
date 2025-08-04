@@ -48,8 +48,18 @@ def benchmark_inference(process_idx, args, result_pipe):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
-    test_prompt = "Hello world from Xu, I am a master student from"
-    input_ids = tokenizer.encode(test_prompt, return_tensors="pt", add_special_tokens=False).to(device)
+    # test_prompt = "Hello world from Xu, I am a master student from"
+    test_prompt = ""
+    bos_token_id = tokenizer.bos_token_id
+    if bos_token_id is not None:
+        input_ids = torch.tensor([[bos_token_id]], dtype=torch.long, device=device)
+    else:
+        # 如果tokenizer没有bos_token_id，可能需要手动获取或处理
+        logger.warning("Tokenizer does not have a bos_token_id. Using an empty tensor.")
+        input_ids = torch.tensor([[]], dtype=torch.long, device=device)
+    
+    
+    # input_ids = tokenizer.encode(test_prompt, return_tensors="pt", add_special_tokens=False).to(device)
     # Using use_fast=False since LlamaTokenizerFast takes a long time to start, and we decode 1 token at a time anyway
     
     ssm = AutoModelForCausalLM.from_pretrained("JackFram/llama-68m")
