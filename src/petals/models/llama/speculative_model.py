@@ -224,9 +224,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
             logger.warning("No tree tokens to verify, falling back to regular generation")
             return self._fallback_generation_with_forward(input_ids, logits_processor, past_key_values), past_key_values
         
-        # logger.info(f"attention_mask: {attention_mask}")
         tree_mask_packed = self.pack_bool_mask_to_int64(attention_mask)
-        # logger.info(f"tree_mask_packed: {tree_mask_packed}")
         
         with torch.no_grad():
             if not use_kv_cache:
@@ -308,11 +306,29 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         return verified_tokens, verified_tokens_positions, new_past_key_values, llm_generated_token
     
     def pack_bool_mask_to_int64(self, mask_bool: torch.Tensor) -> torch.Tensor:
-        packed = np.packbits(mask_bool.cpu().numpy().astype(np.uint8), axis=-1)
-        pad = (-packed.shape[-1]) % 8
-        if pad:
-            packed = np.pad(packed, [(0,0)]*(packed.ndim-1)+[(0,pad)], constant_values=0)
-        packed = packed.reshape(*packed.shape[:-1], -1, 8)
+        batch_size, n, m = mask_bool.shape
+        assert n == m, "Must be square matrix"
+        
+        # 转换为numpy uint8
+        mask_np = mask_bool.cpu().numpy().astype(np.uint8)
+        
+        # 按行打包 - packbits会将每行的n个bool值打包成ceil(n/8)个字节
+        # axis=-1 表示对最后一维（每行）进行打包
+        packed = np.packbits(mask_np, axis=-1)
+        
+        # packed现在的shape是 (batch_size, n, ceil(n/8))
+        # 需要padding到8的倍数（为了形成int64）
+        bytes_per_row = packed.shape[-1]
+        padded_bytes = ((bytes_per_row + 7) // 8) * 8  # 向上取整到8的倍数
+        
+        if padded_bytes > bytes_per_row:
+            pad_width = [(0, 0), (0, 0), (0, padded_bytes - bytes_per_row)]
+            packed = np.pad(packed, pad_width, constant_values=0)
+        
+        # 重塑为 (batch_size, n, num_int64, 8)
+        num_int64 = padded_bytes // 8
+        packed = packed.reshape(batch_size, n, num_int64, 8)
+        
         return torch.from_numpy(packed).to(mask_bool.device)
     
     def _fallback_generation_with_forward(

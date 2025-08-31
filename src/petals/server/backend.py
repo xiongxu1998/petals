@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import torch
 import time
+import numpy as np
 from hivemind import BatchTensorDescriptor, TensorDescriptor
 from hivemind.moe.expert_uid import ExpertUID
 from hivemind.moe.server.module_backend import ModuleBackend
@@ -168,7 +169,7 @@ class TransformerBackend(ModuleBackend):
             )
             attention_mask = self.convert_mask_to_scores(full_mask) if full_mask is not None else None
             # t5 = time.time()
-            
+            logger.info(f"full_mask: {full_mask}")
             # logger.info(f"inference_step, layer_past: {layer_past}")
             
             # 5. 分块处理
@@ -239,16 +240,7 @@ class TransformerBackend(ModuleBackend):
             # logger.info(f"Using cached tree mask for key {cache_key}")
             return cached_mask
         
-        # 解析 tree_attention_mask
-        if hasattr(torch, "unpackbits"):
-            bits = torch.unpackbits(tree_attention_mask.to(device), dim=-1)
-        else:
-            bits = self._unpackbits_fallback(tree_attention_mask.to(device), dim=-1)
-        
-        # bits: [B, tree_len, n_chunks, 64]
-        bits = bits.flatten(start_dim=-3)            # [B, tree_len, n_chunks*64]
-        tree_len = bits.size(1)
-        tree_mask = bits[..., :tree_len].bool()      # [B, tree_len, tree_len]
+        tree_mask = self._unpackbits_fallback(tree_attention_mask.to(device))
         
         # 缓存解析后的 mask
         self._tree_mask_cache[cache_key] = tree_mask  # 存储在 CPU 上以节省 GPU 内存
@@ -279,131 +271,41 @@ class TransformerBackend(ModuleBackend):
         tree_mask = self._get_tree_mask_from_cache(tree_attention_mask, device)
         tree_len = tree_mask.size(1)
         B = tree_mask.size(0)
-        # unpack_time = time.time() - unpack_start
-
-        # ---- 2. 计算关键参数 ----
-        # calc_start = time.time()
         prefix_len = src_len - tree_len
         current_token_count = src_len - past_key_values_length
         
+        logger.info(f"current_token_count: {current_token_count}, past_key_values_length: {past_key_values_length}, prefix_len: {prefix_len}")
         if current_token_count <= 0:
             return None
-        # calc_time = time.time() - calc_start
-        
-        # ---- 3. 优化：分两种常见情况处理 ----
-        
-        # 情况A: 第一次forward (past_key_values_length = 0)
         if past_key_values_length == 0:
-            # case_a_start = time.time()
-            
-            # 需要构建完整mask，但只返回需要的部分
-            # 这种情况下 current_token_count = src_len
-            # tensor_create_start = time.time()
             full_mask = torch.zeros(B, src_len, src_len, dtype=torch.bool, device=device)
-            # tensor_create_time = time.time() - tensor_create_start
-            
-            # 前缀部分：因果mask（向量化）
-            # prefix_start = time.time()
             if prefix_len > 0:
                 causal_indices = torch.tril_indices(prefix_len, prefix_len, device=device)
                 full_mask[:, causal_indices[0], causal_indices[1]] = True
-            # prefix_time = time.time() - prefix_start
-            
-            # 树对前缀的可见性
-            # tree_prefix_start = time.time()
             if prefix_len > 0 and tree_len > 0:
                 full_mask[:, prefix_len:, :prefix_len] = True
-            # tree_prefix_time = time.time() - tree_prefix_start
-            
-            # 树内部可见性
-            # tree_internal_start = time.time()
             if tree_len > 0:
                 full_mask[:, prefix_len:, prefix_len:] = tree_mask
-            # tree_internal_time = time.time() - tree_internal_start
-            
-            # case_a_time = time.time() - case_a_start
-            # total_time = time.time() - start_time
-            
-            # print(f"[Case A] Total: {total_time*1000:.3f}ms, "
-            #       f"Unpack: {unpack_time*1000:.3f}ms, "
-            #       f"Calc: {calc_time*1000:.3f}ms, "
-            #       f"TensorCreate: {tensor_create_time*1000:.3f}ms, "
-            #       f"Prefix: {prefix_time*1000:.3f}ms, "
-            #       f"TreePrefix: {tree_prefix_time*1000:.3f}ms, "
-            #       f"TreeInternal: {tree_internal_time*1000:.3f}ms")
-            
             return full_mask
         
         # 情况B: 后续的增量生成 (通常 current_token_count 很小)
         else:
-            # case_b_start = time.time()
-
-            # 直接构建小的current_mask
-            # tensor_create_start = time.time()
             current_mask = torch.zeros(B, current_token_count, src_len, dtype=torch.bool, device=device)
-            # tensor_create_time = time.time() - tensor_create_start
-
-            # 判断当前token的位置
-            # position_start = time.time()
             start_pos = past_key_values_length
-            # position_time = time.time() - position_start
-
-            # 如果还在前缀部分（较少见）
             if start_pos < prefix_len:
-                # prefix_case_start = time.time()
-
                 prefix_tokens = min(current_token_count, prefix_len - start_pos)
                 # 因果mask
                 for i in range(prefix_tokens):
                     current_mask[:, i, :start_pos + i + 1] = True
-
-                # 如果有token进入树部分
                 if current_token_count > prefix_tokens:
                     tree_tokens = current_token_count - prefix_tokens
-                    # 树token可以看到所有前缀
                     current_mask[:, prefix_tokens:, :prefix_len] = True
-                    # 树内部可见性
                     current_mask[:, prefix_tokens:, prefix_len:] = tree_mask[:, :tree_tokens, :]
-
-                # prefix_case_time = time.time() - prefix_case_start
-                # case_b_time = time.time() - case_b_start
-                # total_time = time.time() - start_time
-
-                # print(f"[Case B-Prefix] Total: {total_time1000:.3f}ms, "
-                #       f"Unpack: {unpack_time1000:.3f}ms, "
-                #       f"Calc: {calc_time1000:.3f}ms, "
-                #       f"TensorCreate: {tensor_create_time1000:.3f}ms, "
-                #       f"Position: {position_time1000:.3f}ms, "
-                #       f"PrefixLogic: {prefix_case_time1000:.3f}ms")
-            
-            # 如果都在树部分（最常见）
             else:
-                # tree_case_start = time.time()
-                
                 tree_start = start_pos - prefix_len
-                # 所有当前token都可以看到前缀
-                # prefix_visible_start = time.time()
                 if prefix_len > 0:
                     current_mask[:, :, :prefix_len] = True
-                # prefix_visible_time = time.time() - prefix_visible_start
-                
-                # 树内部可见性
-                # tree_visible_start = time.time()
                 current_mask[:, :, prefix_len:] = tree_mask[:, tree_start:tree_start + current_token_count, :]
-                # tree_visible_time = time.time() - tree_visible_start
-                
-                # tree_case_time = time.time() - tree_case_start
-                # case_b_time = time.time() - case_b_start
-                # total_time = time.time() - start_time
-                
-                # print(f"[Case B-Tree] Total: {total_time*1000:.3f}ms, "
-                #       f"Unpack: {unpack_time*1000:.3f}ms, "
-                #       f"Calc: {calc_time*1000:.3f}ms, "
-                #       f"TensorCreate: {tensor_create_time*1000:.3f}ms, "
-                #       f"Position: {position_time*1000:.3f}ms, "
-                #       f"PrefixVisible: {prefix_visible_time*1000:.3f}ms, "
-                #       f"TreeVisible: {tree_visible_time*1000:.3f}ms")
-            
             return current_mask
     
     def convert_mask_to_scores(self, mask: torch.Tensor) -> torch.Tensor:
@@ -427,26 +329,36 @@ class TransformerBackend(ModuleBackend):
         
         return scores
         
-    def _unpackbits_fallback(self, x: torch.Tensor, *, dim: int = -1) -> torch.Tensor:
-        """
-        手动实现 torch.unpackbits, 保持与 numpy 默认的 'big' bitorder 一致：
-        MSB 在前 → 对应 shift 7,6,...,0
-        支持 GPU & broadcast, 仅限 uint8。
-        """
-        if x.dtype != torch.uint8:
-            raise TypeError("fallback unpackbits expects uint8 input")
-
-        # 把目标维度挪到最后，方便向量化
-        if dim != -1 and dim != x.ndim - 1:
-            x = x.movedim(dim, -1)
-
-        shifts = torch.arange(7, -1, -1, device=x.device, dtype=torch.uint8)
-        bits = (x.unsqueeze(-1) >> shifts) & 1          # [..., 8]
-        # 现在 bits 的最后一维是 bit 列表；如果原 dim 不是最后，再挪回去
-        if dim != -1 and dim != x.ndim - 1:
-            bits = bits.movedim(-2, dim)
-
-        return bits
+    def _unpackbits_fallback(self, packed: torch.Tensor) -> torch.Tensor:
+        batch_size = packed.shape[0]
+        n = packed.shape[1]  # 从第二维获取原始矩阵大小
+        
+        # 只取第一个"行"的数据（因为打包时复制了）
+        # (batch_size, n, num_int64, 8) -> (batch_size, num_int64, 8)
+        packed_data = packed[:, 0, :, :]
+        
+        # 展平为字节序列
+        # (batch_size, num_int64, 8) -> (batch_size, num_bytes)
+        batch_size, n, num_int64, _ = packed.shape
+    
+        # 重塑为按行的字节序列
+        # (batch_size, n, num_int64, 8) -> (batch_size, n, num_int64*8)
+        packed_bytes = packed.reshape(batch_size, n, num_int64 * 8)
+        
+        # 转换为numpy
+        packed_np = packed_bytes.cpu().numpy().astype(np.uint8)
+        
+        # 按行解包 - unpackbits会将每行的字节解包为bits
+        unpacked = np.unpackbits(packed_np, axis=-1)
+        
+        # unpacked现在的shape是 (batch_size, n, num_int64*8*8)
+        # 只保留前n个bits（每行）
+        unpacked = unpacked[:, :, :n]
+        
+        # shape已经是 (batch_size, n, n)
+        mask_bool = torch.from_numpy(unpacked.astype(bool)).to(packed.device)
+        
+        return mask_bool
     
     def _compact_cache_inplace(
         self, 
