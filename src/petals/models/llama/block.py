@@ -60,6 +60,8 @@ class OptimizedLlamaAttention(LlamaAttention):
             position_ids = torch.arange(
                 past_seen_tokens, past_seen_tokens + hidden_states.shape[1], device=hidden_states.device
             ).unsqueeze(0)
+            
+        logger.info(f"OptimizedLlamaAttention, position_ids: {position_ids}")
 
         bsz, q_len, _ = hidden_states.size()
 
@@ -248,24 +250,28 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
             seq_length_with_past = seq_length_with_past + past_key_values_length
             past_key_value = self._reorder_cache_from_bloom_to_llama(past_key_value, batch_size, past_key_values_length)
 
-        assert position_ids is None
+        # assert position_ids is None
 
         # embed positions
         if attention_mask is None:
             attention_mask = torch.ones(
                 (batch_size, seq_length_with_past), dtype=torch.bool, device=hidden_states.device
             )
-        if attention_mask.dim() == 3:
-            attention_mask = attention_mask.unsqueeze(1)  # (B, 1, T, S)
-        elif attention_mask.dim() == 4:
-            pass  # 已经是合法 4D mask
-        else:
             attention_mask = _prepare_4d_causal_attention_mask(
                 attention_mask=attention_mask,
                 input_shape=(batch_size, seq_length),
                 inputs_embeds=hidden_states,
                 past_key_values_length=past_key_values_length,
             )
+        logger.info(f"attention_mask dim: {attention_mask.dim()}")
+        if attention_mask.dim() == 3:
+            attention_mask = attention_mask.unsqueeze(1)  # (B, 1, T, S)
+        elif attention_mask.dim() == 4:
+            pass  # 已经是合法 4D mask
+        else:
+            
+            pass
+        logger.info(f"attention_mask shape after format: {attention_mask.shape}")
         # logger.info(f"WrappedLlamaBlock forward, attention_mask: {attention_mask}, seq_length_with_past: {seq_length_with_past}, seq_length: {seq_length}, past_key_values_length: {past_key_values_length}")
         
         # test_attention_mask = torch.ones(

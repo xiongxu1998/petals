@@ -140,6 +140,8 @@ class TransformerBackend(ModuleBackend):
             # logger.info(f"inference_step, prefix_len: {inference_info.prefix_length}, kv_cache_position_ids: {inference_info.kv_cache_position_ids}")
             
             # 1. 选择需要的 cache（返回两个值）
+            
+            logger.info(f"prefix_length: {inference_info.prefix_length}, kv_cache_position_ids: {inference_info.kv_cache_position_ids}")
             layer_past, need_reorder = self._select_layer_past(
                 cache_tensors, 
                 inference_info.prefix_length, 
@@ -176,12 +178,21 @@ class TransformerBackend(ModuleBackend):
             forward_time = 0
             for offset in range(0, seq_len, max_chunk_length):
                 hidden_states_chunk = hidden_states[:, offset : offset + max_chunk_length, :]
+                # tree_position_ids = torch.tensor([[0, 1, 2, 3, 3, 2, 3, 3, 1, 2, 3, 3, 2, 3, 3]], device='cuda:0')
+                # position_ids = tree_position_ids + past_key_values_length
+                # tree_depths = [0, 1, 2, 3, 4, 4, 3, 4, 4, 2, 3, 4, 4, 3, 4, 4, 1, 2, 3, 4, 4, 3, 4, 4, 2, 3, 4, 4, 3, 4, 4]
+                
+                # 宽度2深度6的树，包含根节点的深度序列
+                tree_depths = [0, 1, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5, 1, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5]
+
+                position_ids = torch.tensor([tree_depths], device='cuda:0') + past_key_values_length
                 
                 # t_forward_start = time.time()
                 output_hidden_states_chunk, new_kvs = self.module.forward(
                     hidden_states_chunk, 
                     layer_past=layer_past, 
-                    attention_mask=attention_mask, 
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
                     use_cache=True
                 )
                 # forward_time += time.time() - t_forward_start
