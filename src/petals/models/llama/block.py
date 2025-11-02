@@ -64,6 +64,8 @@ class OptimizedLlamaAttention(LlamaAttention):
         logger.info(f"OptimizedLlamaAttention, position_ids: {position_ids}")
 
         bsz, q_len, _ = hidden_states.size()
+        
+        logger.info(f"after norm, input hidden_states: {hidden_states} ")
 
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
@@ -90,6 +92,10 @@ class OptimizedLlamaAttention(LlamaAttention):
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        
+        logger.info(f"after projection, query_states: {query_states}")
+        logger.info(f"after projection, key_states: {key_states}")
+        logger.info(f"after projection, value_states: {value_states}")
 
         cos, sin = self.rotary_emb(value_states, position_ids)
         cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
@@ -98,6 +104,9 @@ class OptimizedLlamaAttention(LlamaAttention):
             query_states, key_states = self._optimized_apply_rotary(query_states, key_states, cos, sin)
         else:
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            
+        logger.info(f"after rotary, query_states: {query_states}")
+        logger.info(f"after rotary, key_states: {key_states}")
 
         if past_key_value is not None:
             # reuse k, v, self_attention
@@ -111,6 +120,9 @@ class OptimizedLlamaAttention(LlamaAttention):
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        
+        # logger.info(f"attention_mask: {attention_mask.shape}")
+        # logger.info(f"attention_mask: {attention_mask}")
 
         if attention_mask is not None:
             # logger.info(f"OptimizedLlamaAttention, attention_mask: {attention_mask.shape}, attn_weights: {attn_weights.shape}")
@@ -118,6 +130,7 @@ class OptimizedLlamaAttention(LlamaAttention):
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        logger.info(f"after softmax, attn_weights: {attn_weights}")
         attn_output = torch.matmul(attn_weights, value_states)
 
         attn_output = attn_output.transpose(1, 2).contiguous()

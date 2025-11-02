@@ -171,7 +171,7 @@ class TransformerBackend(ModuleBackend):
             )
             attention_mask = self.convert_mask_to_scores(full_mask) if full_mask is not None else None
             # t5 = time.time()
-            logger.info(f"full_mask: {full_mask}")
+            # logger.info(f"full_mask: {full_mask}")
             # logger.info(f"inference_step, layer_past: {layer_past}")
             
             # 5. 分块处理
@@ -180,12 +180,14 @@ class TransformerBackend(ModuleBackend):
                 hidden_states_chunk = hidden_states[:, offset : offset + max_chunk_length, :]
                 # tree_position_ids = torch.tensor([[0, 1, 2, 3, 3, 2, 3, 3, 1, 2, 3, 3, 2, 3, 3]], device='cuda:0')
                 # position_ids = tree_position_ids + past_key_values_length
-                # tree_depths = [0, 1, 2, 3, 4, 4, 3, 4, 4, 2, 3, 4, 4, 3, 4, 4, 1, 2, 3, 4, 4, 3, 4, 4, 2, 3, 4, 4, 3, 4, 4]
+                tree_depths = [0, 1, 2, 3, 4, 4, 3, 4, 4, 2, 3, 4, 4, 3, 4, 4, 1, 2, 3, 4, 4, 3, 4, 4, 2, 3, 4, 4, 3, 4, 4]
                 
                 # 宽度2深度6的树，包含根节点的深度序列
-                tree_depths = [0, 1, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5, 1, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5]
+                # tree_depths = [0, 1, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5, 1, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5, 2, 3, 4, 5, 5, 4, 5, 5, 3, 4, 5, 5, 4, 5, 5]
 
                 position_ids = torch.tensor([tree_depths], device='cuda:0') + past_key_values_length
+                
+                logger.info(f"hidden states in backend before compute: {hidden_states}")
                 
                 # t_forward_start = time.time()
                 output_hidden_states_chunk, new_kvs = self.module.forward(
@@ -207,6 +209,7 @@ class TransformerBackend(ModuleBackend):
 
             # 6. 最后更新 cache（将新生成的 KV 写入）
             self._update_cache_inplace(cache_tensors, new_kvs, past_key_values_length)
+            logger.info(f"output_hidden_states: {output_hidden_states}")
             # t7 = time.time()
             
             # 打印时间统计

@@ -180,7 +180,7 @@ class _ServerInferenceSession:
         ), f"output activation shape is different from input shape: {outputs[0].shape} != {inputs.shape}"
 
         self._position += n_input_tokens
-
+        logger.info(f"server inference session output and shape: {len(outputs[0])},  {outputs[0]} "  )
         return outputs[0]
     
     def pack_kv_into_tree_mask(self, tree_attention_mask, kv_cache_position_ids):
@@ -360,13 +360,16 @@ class InferenceSession:
         # logger.info(f"InferenceSession, kv_cache_position_ids: {kv_cache_position_ids}")
 
         n_input_tokens = inputs.shape[1]
-        if self._position + n_input_tokens > self._max_length:
-            raise ValueError(
-                f"Maximum length exceeded: prefix {self._position} + current {n_input_tokens} exceeds pre-allocated maximum {self._max_length}"
-            )
+        # if self._position + n_input_tokens > self._max_length:
+        #     raise ValueError(
+        #         f"Maximum length exceeded: prefix {self._position} + current {n_input_tokens} exceeds pre-allocated maximum {self._max_length}"
+        #     )
 
         server_idx = 0
         block_idx = 0
+        
+        logger.info(f"hidden states in inference session: {inputs}")
+        
         while block_idx < self.num_blocks:
             for attempt_no in itertools.count():
                 logger.debug(f"Inference: block {block_idx}, attempt {attempt_no}")

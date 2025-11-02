@@ -52,8 +52,8 @@ def convert_block(
 
     block = make_tensor_parallel(block, config, tensor_parallel_devices, output_device=output_device)
 
-    if quant_type != QuantType.NONE:
-        block = quantize_module(block, quant_type=quant_type)
+    # if quant_type != QuantType.NONE:
+    #     block = quantize_module(block, quant_type=quant_type)
 
     for shard, device in zip(block.module_shards, block.devices):
         shard.to(device)

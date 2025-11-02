@@ -35,7 +35,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         streamer: Optional["BaseStreamer"] = None,
         beam_width: int = 2,
-        max_tree_depth: int = 5,
+        max_tree_depth: int = 4,
         use_kv_cache: bool = True,
         kv_cache_window: int = 2048,
         max_new_tokens: int = 128,
@@ -50,7 +50,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         generation_config.return_dict_in_generate = False
 
         # Calculate session max length - this is critical for distributed inference
-        session_max_length = 2048
+        session_max_length = 4096
 
         # Use inference session for proper distributed caching
         with self.transformer.h.inference_session(max_length=session_max_length) as session:
@@ -217,7 +217,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         )
         
         # logger.info(f"[DEBUG] Tree tokens shape: {tree_tokens.shape}")
-        # logger.info(f"[DEBUG] Tree tokens: {tree_tokens}")
+        logger.info(f"[DEBUG] Tree tokens: {tree_tokens}")
         # logger.info(f"[DEBUG] Active session position: {self.transformer.h.active_session.position if self.transformer.h.active_session else 'None'}")
         
         if attention_mask is None or tree_tokens.shape[1] == 0:
@@ -302,7 +302,7 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         verified_tokens, verified_tokens_positions, llm_generated_token = self._extract_best_verified_paths_fixed(
             logits, batch_node_paths, input_ids, logits_processor, tree_tokens.shape[1]
         )
-        # logger.info(f"[DEBUG] Verified tokens (per batch): {verified_tokens.tolist() if verified_tokens is not None else None}, verified_tokens_positions: {verified_tokens_positions}, llm_generated_token: {llm_generated_token}")
+        logger.info(f"[DEBUG] Verified tokens (per batch): {verified_tokens.tolist() if verified_tokens is not None else None}, verified_tokens_positions: {verified_tokens_positions}, llm_generated_token: {llm_generated_token}")
         return verified_tokens, verified_tokens_positions, new_past_key_values, llm_generated_token
     
     def pack_bool_mask_to_int64(self, mask_bool: torch.Tensor) -> torch.Tensor:
@@ -494,38 +494,23 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
         """
         Extract best verified paths (simplified for batch=1)
         Returns: (verified_tokens, kv_cache_position_ids)
-        
-        kv_cache_position_ids的结构: 一维数组
-        - 首个元素: 树根位置ID (input_ids.shape[1] - 1)
-        - 后续元素: 与verified_tokens对应的位置ID
         """
-        # 计算树的总长度
         total_tree_tokens = tree_len
         fallback_pos = max(0, logits.shape[1] - total_tree_tokens)
-        
-        # 树根的位置ID
         tree_root_position = input_ids.shape[1] - 1
         
-        # 只处理第一个batch (batch=1)
+        logger.info(f"_extract_best_verified_paths_fixed, logits: {logits}")
+        logger.info(f"_extract_best_verified_paths_fixed, input_ids: {input_ids}")
+        
         node_paths = batch_node_paths[0]
         best_verified = []
         best_positions = []
         best_score = -1
-        # logger.info(f"node_paths: {node_paths}")
-        # 找到最佳验证路径
         for node_path in node_paths:
             verified_tokens = []
             verified_positions = []
-            
-            printed_nodes = [node.token_id for node in node_path]
-            position_nodes = [node.position_in_sequence for node in node_path]
-            logger.info(f"node_path: {printed_nodes}")
-                
-            logger.info(f"node_positions: {position_nodes}")
-            
             for node in node_path:
                 pos = node.parent.position_in_sequence + 1
-                logger.info(f"node: {node.token_id}, parent node position: {pos}")
                 if pos >= logits.shape[1]:
                     break
                 
@@ -542,67 +527,38 @@ class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM):
                 best_score = len(verified_tokens)
                 best_verified = verified_tokens
                 best_positions = verified_positions
-        
-        # Handle empty verification case
+                
         logger.info(f"_extract_best_verified_paths_fixed, best_verified: {best_verified}, best_positions: {best_positions}, logits: {logits.shape}, fallback_pos: {fallback_pos}, input_ids.shape: {input_ids.shape}")
+        
         if len(best_verified) == 0:
-            # logger.warning("No tokens verified, using reverse indexing for fallback")
-            
-            # 生成fallback token
+            logger.info(f"fallback_pos: {fallback_pos}")
             final_logits = logits[0, fallback_pos-1:fallback_pos]  # 取单个位置的logits
+            logger.info(f"final_logits: {final_logits}")
             processed_logits = final_logits
             for processor in logits_processor:
                 processed_logits = processor(input_ids, processed_logits)
+                
+            top5_values, top5_indices = torch.topk(final_logits[0], k=5)
+            logger.info(f"Top 5 tokens: {top5_indices.tolist()}")
+            logger.info(f"Top 5 values: {top5_values.tolist()}")
             
             next_token = torch.argmax(logits[0, fallback_pos-1]).item()
-            # next_token = torch.argmax(processed_logits, dim=-1, keepdim=True)
-            
-            # 构建kv_cache_position_ids：[树根位置, fallback token位置]
+            logger.info(f"next_token: {next_token}")
             kv_cache_position_ids = torch.tensor([tree_root_position], 
                                             device=logits.device)
-            
-            # logger.info(f"[DEBUG] Fallback kv_cache_position_ids: {kv_cache_position_ids.tolist()}")
             llm_generated_token = torch.tensor([next_token], device=logits.device)
-            logger.info(f"llm_generated_token, next_token: {llm_generated_token}")
             return None, kv_cache_position_ids, llm_generated_token
         
-        # 有验证token的情况 - 不需要填充，直接转tensor
         verified_tensor = torch.tensor([best_verified], device=logits.device)  # [1, num_verified]
-        
-        # Generate additional token using logits processor
-        # if len(best_verified) < logits.shape[1]:
-        #     pos = len(best_verified)
-        # else:
-        #     pos = logits.shape[1] - 1
         pos = best_positions[-1] - tree_root_position
-        logger.info(f"llm_generated_token pos: {pos}")
         final_logits = logits[0, pos - 1:pos]  # 取单个位置的logits
-        
-        # Apply logits processor
-        processor_input = torch.cat([input_ids, verified_tensor], dim=1)
         processed_logits = final_logits
-        # for processor in logits_processor:
-        #     processed_logits = processor(processor_input, processed_logits)
-        
-        # next_token = torch.argmax(processed_logits, dim=-1, keepdim=True)
+        for processor in logits_processor:
+            processed_logits = processor(input_ids, processed_logits)
         next_token = torch.argmax(logits[0, pos]).item()
-        logger.info(f"llm_generated_token, next_token: {next_token}")
-        
-        # 计算下一个token的位置
-        # if len(best_positions) > 0:
-        #     next_pos = best_positions[-1] + 1
-        # else:
-        #     next_pos = input_ids.shape[1]
-        
-        # 合并verified tokens和新生成的token
-        # verified_tensor = torch.cat([verified_tensor, next_token], dim=1)
         llm_generated_token = torch.tensor([next_token], device=logits.device)
         
-        # 构建最终的kv_cache_position_ids：[树根位置, verified_positions..., next_token_position]
         all_positions = [tree_root_position] + best_positions
         kv_cache_position_ids = torch.tensor(all_positions, device=logits.device)
-        
-        # logger.info(f"[DEBUG] Final kv_cache_position_ids: {kv_cache_position_ids.tolist()}")
-        logger.info(f"kv_cache_position_ids: {kv_cache_position_ids}")
-        
+
         return verified_tensor, kv_cache_position_ids, llm_generated_token
